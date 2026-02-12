@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 // =============================================================================
-// Prompt Coach MCP Server — v2.1 (TypeScript)
+// Prompt Discipline MCP Server — v3.0
 // =============================================================================
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { isToolEnabled, getProfile } from "./profiles.js";
 
 // Category 1: Plans
 import { registerScopeWork } from "./tools/scope-work.js";
@@ -31,41 +32,59 @@ import { registerSessionHandoff } from "./tools/session-handoff.js";
 import { registerWhatChanged } from "./tools/what-changed.js";
 // Category 12: Verification
 import { registerVerifyCompletion } from "./tools/verify-completion.js";
+// New lightweight tools
+import { registerSessionStats } from "./tools/session-stats.js";
+import { registerPromptScore } from "./tools/prompt-score.js";
 // Timeline: Project Intelligence
 import { registerOnboardProject } from "./tools/onboard-project.js";
 import { registerSearchHistory } from "./tools/search-history.js";
 import { registerTimeline } from "./tools/timeline-view.js";
 import { registerScanSessions } from "./tools/scan-sessions.js";
 
+const profile = getProfile();
 const server = new McpServer({
-  name: "prompt-coach",
+  name: "prompt-discipline",
   version: "3.0.0",
 });
 
-// Register all 12 category tools (14 tools total)
-registerScopeWork(server);          // 1. Plans
-registerClarifyIntent(server);      // 2. Clarification
-registerEnrichAgentTask(server);    // 3. Delegation
-registerSharpenFollowup(server);    // 4. Follow-up Specificity
-registerTokenAudit(server);         // 5. Token Efficiency
-registerSequenceTasks(server);      // 6. Sequencing
-registerCheckpoint(server);         // 7. Compaction Management
-registerSessionHealth(server);      // 8. Session Lifecycle
-registerLogCorrection(server);      // 9. Error Recovery
-registerAuditWorkspace(server);     // 10. Workspace Hygiene
-registerSessionHandoff(server);     // 11a. Cross-Session Continuity
-registerWhatChanged(server);        // 11b. Cross-Session Continuity
-registerVerifyCompletion(server);   // 12. Verification
+// Register tools based on profile
+type RegisterFn = (server: McpServer) => void;
 
-// Timeline tools
-registerOnboardProject(server);     // Project onboarding + indexing
-registerSearchHistory(server);      // Semantic search across history
-registerTimeline(server);           // Chronological timeline view
-registerScanSessions(server);       // Live session scanning
+const toolRegistry: Array<[string, RegisterFn]> = [
+  ["scope_work", registerScopeWork],
+  ["clarify_intent", registerClarifyIntent],
+  ["enrich_agent_task", registerEnrichAgentTask],
+  ["sharpen_followup", registerSharpenFollowup],
+  ["token_audit", registerTokenAudit],
+  ["sequence_tasks", registerSequenceTasks],
+  ["checkpoint", registerCheckpoint],
+  ["check_session_health", registerSessionHealth],
+  ["log_correction", registerLogCorrection],
+  ["audit_workspace", registerAuditWorkspace],
+  ["session_handoff", registerSessionHandoff],
+  ["what_changed", registerWhatChanged],
+  ["verify_completion", registerVerifyCompletion],
+  ["session_stats", registerSessionStats],
+  ["prompt_score", registerPromptScore],
+  ["onboard_project", registerOnboardProject],
+  ["search_history", registerSearchHistory],
+  ["timeline_view", registerTimeline],
+  ["scan_sessions", registerScanSessions],
+];
+
+let registered = 0;
+for (const [name, register] of toolRegistry) {
+  if (isToolEnabled(name)) {
+    register(server);
+    registered++;
+  }
+}
+
+process.stderr.write(`prompt-discipline: profile=${profile}, tools=${registered}\n`);
 
 // Graceful shutdown
 function shutdown() {
-  process.stderr.write("prompt-coach: shutting down\n");
+  process.stderr.write("prompt-discipline: shutting down\n");
   process.exit(0);
 }
 process.on("SIGINT", shutdown);
@@ -75,8 +94,8 @@ process.on("SIGTERM", shutdown);
 try {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  process.stderr.write("prompt-coach: server started\n");
+  process.stderr.write("prompt-discipline: server started\n");
 } catch (err) {
-  process.stderr.write(`prompt-coach: failed to start — ${err}\n`);
+  process.stderr.write(`prompt-discipline: failed to start — ${err}\n`);
   process.exit(1);
 }

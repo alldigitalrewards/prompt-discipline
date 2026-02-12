@@ -1,0 +1,13 @@
+{
+  "name": "prompt-discipline",
+  "description": "Prevents rapid-fire shorthand prompts from wasting tokens and causing wrong outputs. Includes hooks that catch vague instructions, commands for common workflows, and a prompt-coach skill that enriches ambiguous requests with project context.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Jack Felke",
+    "email": "jack@alldigitalrewards.com"
+  },
+  "license": "MIT",
+  "keywords": ["prompting", "efficiency", "hooks", "discipline", "tokens"],
+  "category": "productivity",
+  "tags": ["prompting", "optimization", "workflow", "hooks"]
+}
