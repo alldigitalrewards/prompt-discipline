@@ -8,9 +8,9 @@ import { PROJECT_DIR } from "../lib/files.js";
 import { run, getBranch, getStatus, getRecentCommits, getDiffFiles, getStagedFiles } from "../lib/git.js";
 import { now } from "../lib/state.js";
 import { findWorkspaceDocs } from "../lib/files.js";
+import { getConfig } from "../lib/config.js";
 import { searchSemantic } from "../lib/timeline-db.js";
 import { basename, join } from "path";
-import { getConfig } from "../lib/config.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -187,7 +187,15 @@ export function registerPreflightCheck(server: McpServer): void {
       }
 
       // --- Triage ---
-      const triage = triagePrompt(prompt);
+      const preflightConfig = getConfig();
+      const triageConfig = {
+        alwaysCheck: preflightConfig.triage.rules.always_check,
+        skip: preflightConfig.triage.rules.skip,
+        crossServiceKeywords: preflightConfig.triage.rules.cross_service_keywords,
+        strictness: preflightConfig.triage.strictness,
+        relatedAliases: preflightConfig.related_projects.map(p => p.alias),
+      };
+      const triage = triagePrompt(prompt, triageConfig);
       let effectiveLevel: TriageLevel = triage.level;
 
       if (force_level === "light") effectiveLevel = "ambiguous";

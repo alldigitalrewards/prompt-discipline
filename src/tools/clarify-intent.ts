@@ -3,6 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { run, getBranch, getStatus, getRecentCommits, getDiffFiles, getStagedFiles } from "../lib/git.js";
 import { findWorkspaceDocs, PROJECT_DIR } from "../lib/files.js";
 import { searchSemantic } from "../lib/timeline-db.js";
+import { getRelatedProjects } from "../lib/config.js";
 import { existsSync, readFileSync } from "fs";
 import { join, basename } from "path";
 
@@ -86,13 +87,6 @@ function extractSignals(msg: string, context: { hasTypeErrors: boolean; hasTestF
   if (!signals.length) signals.push("UNCLEAR: Ask ONE clarifying question before proceeding.");
 
   return signals;
-}
-
-/** Get related projects from PREFLIGHT_RELATED env var */
-function getRelatedProjects(): string[] {
-  const related = process.env.PREFLIGHT_RELATED;
-  if (!related) return [];
-  return related.split(",").map(p => p.trim()).filter(Boolean);
 }
 
 /** Search for relevant cross-project context */

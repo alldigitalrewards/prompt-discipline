@@ -1,0 +1,23 @@
+# Preflight Configuration
+# =============================================================================
+
+# Profile: minimal | standard | full
+profile: standard
+
+# Related projects for cross-service context
+related_projects:
+  # - path: /Users/jack/Developer/auth-service
+  #   alias: auth-service
+  # - path: /Users/jack/Developer/notifications-service
+  #   alias: notifications-service
+
+# Thresholds
+thresholds:
+  session_stale_minutes: 30
+  max_tool_calls_before_checkpoint: 100
+  correction_pattern_threshold: 3  # corrections before pattern triggers
+
+# Embedding provider: local | openai
+embeddings:
+  provider: local  # or openai
+  # openai_api_key: from env var OPENAI_API_KEY

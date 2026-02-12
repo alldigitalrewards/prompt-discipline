@@ -4,13 +4,44 @@
 // =============================================================================
 
 import { createInterface } from "node:readline";
-import { readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { readFile, writeFile, mkdir, copyFile } from "node:fs/promises";
+import { join, dirname } from "node:path";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 const rl = createInterface({ input: process.stdin, output: process.stdout });
 
 function ask(question: string): Promise<string> {
   return new Promise((resolve) => rl.question(question, resolve));
+}
+
+/** Create .preflight/ directory with template files */
+async function createPreflightConfig(): Promise<void> {
+  const preflightDir = join(process.cwd(), ".preflight");
+  
+  if (existsSync(preflightDir)) {
+    console.log("⚠️  .preflight/ directory already exists, skipping...\n");
+    return;
+  }
+
+  try {
+    await mkdir(preflightDir, { recursive: true });
+    
+    // Get the current module's directory to find templates
+    const currentFile = fileURLToPath(import.meta.url);
+    const srcDir = dirname(dirname(currentFile)); // Go up from cli/ to src/
+    const templatesDir = join(srcDir, "templates");
+    
+    // Copy template files
+    await copyFile(join(templatesDir, "config.yml"), join(preflightDir, "config.yml"));
+    await copyFile(join(templatesDir, "triage.yml"), join(preflightDir, "triage.yml"));
+    
+    console.log("✅ Created .preflight/ directory with template config files");
+    console.log("   Edit .preflight/config.yml to configure your project settings");
+    console.log("   Edit .preflight/triage.yml to customize prompt triage rules\n");
+  } catch (error) {
+    console.error(`❌ Failed to create .preflight/ directory: ${error}\n`);
+  }
 }
 
 interface McpConfig {
@@ -46,6 +77,15 @@ async function main(): Promise<void> {
   const profileMap: Record<string, string> = { "1": "minimal", "2": "standard", "3": "full" };
   const profile = profileMap[choice.trim()] || "standard";
 
+  // Ask about creating .preflight/ directory
+  console.log("\nPreflight can use either environment variables or a .preflight/ directory for configuration.");
+  console.log("The .preflight/ directory allows you to configure related projects, custom triage rules, and thresholds.\n");
+  
+  const createConfig = await ask("Create .preflight/ directory with template config? [y/N]: ");
+  if (createConfig.trim().toLowerCase() === "y" || createConfig.trim().toLowerCase() === "yes") {
+    await createPreflightConfig();
+  }
+
   const env: Record<string, string> = {
     PROMPT_DISCIPLINE_PROFILE: profile,
   };
@@ -80,6 +120,57 @@ async function main(): Promise<void> {
   };
 
   await writeFile(mcpPath, JSON.stringify(config, null, 2) + "\n");
+
+  // Offer to create .preflight/ config directory
+  const preflightDir = join(process.cwd(), ".preflight");
+  if (!existsSync(preflightDir)) {
+    const createConfig = await ask("\nCreate .preflight/ config directory with template files? [y/N]: ");
+    if (createConfig.trim().toLowerCase() === "y") {
+      await mkdir(preflightDir, { recursive: true });
+
+      const configYml = `# Preflight configuration
+profile: ${profile}
+
+related_projects: []
+# - path: /path/to/related/project
+#   alias: project-name
+
+thresholds:
+  session_stale_minutes: 30
+  max_tool_calls_before_checkpoint: 100
+  correction_pattern_threshold: 3
+
+embeddings:
+  provider: local
+`;
+
+      const triageYml = `# Triage rules for prompt classification
+rules:
+  always_check:
+    - rewards
+    - permissions
+    - migration
+    - schema
+  skip:
+    - commit
+    - format
+    - lint
+  cross_service_keywords:
+    - auth
+    - notification
+    - event
+    - webhook
+
+strictness: standard
+`;
+
+      await writeFile(join(preflightDir, "config.yml"), configYml);
+      await writeFile(join(preflightDir, "triage.yml"), triageYml);
+      console.log("✅ Created .preflight/config.yml and .preflight/triage.yml");
+    }
+  } else {
+    console.log("\n.preflight/ directory already exists — skipping.");
+  }
 
   console.log(`\n✅ preflight added! (profile: ${profile})`);
   console.log("Restart Claude Code to connect.\n");

@@ -4,6 +4,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { run, getBranch, getRecentCommits, getStatus } from "../lib/git.js";
 import { readIfExists, findWorkspaceDocs, PROJECT_DIR } from "../lib/files.js";
 import { searchSemantic } from "../lib/timeline-db.js";
+import { getRelatedProjects } from "../lib/config.js";
 import { now } from "../lib/state.js";
 import { existsSync } from "fs";
 import { join, normalize, resolve, basename } from "path";
@@ -41,13 +42,6 @@ function parsePortelainFiles(porcelain: string): string[] {
 function isSafePath(dir: string): boolean {
   const resolved = resolve(PROJECT_DIR, dir);
   return resolved.startsWith(resolve(PROJECT_DIR));
-}
-
-/** Get related projects from PREFLIGHT_RELATED env var */
-function getRelatedProjects(): string[] {
-  const related = process.env.PREFLIGHT_RELATED;
-  if (!related) return [];
-  return related.split(",").map(p => p.trim()).filter(Boolean);
 }
 
 /** Search for relevant cross-project context for scoping */

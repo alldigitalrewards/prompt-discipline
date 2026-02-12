@@ -1,0 +1,27 @@
+# Preflight Triage Rules
+# =============================================================================
+
+# Custom triage classification rules
+rules:
+  # Always full-check prompts mentioning these keywords
+  always_check:
+    - rewards
+    - permissions
+    - migration
+    - schema
+  
+  # Never check these (pass-through)
+  skip:
+    - commit
+    - format
+    - lint
+  
+  # Cross-service keywords (trigger related project search)
+  cross_service_keywords:
+    - auth
+    - notification
+    - event
+    - webhook
+
+# Default strictness: relaxed | standard | strict
+strictness: standard

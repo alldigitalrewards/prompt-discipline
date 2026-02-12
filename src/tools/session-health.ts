@@ -3,6 +3,7 @@ import { z } from "zod";
 import { getBranch, getStatus, getLastCommit, getLastCommitTime, run } from "../lib/git.js";
 import { readIfExists, findWorkspaceDocs } from "../lib/files.js";
 import { loadState, saveState } from "../lib/state.js";
+import { getConfig } from "../lib/config.js";
 
 /** Parse a git date string safely, returning null on failure */
 function parseGitDate(dateStr: string): Date | null {
@@ -19,7 +20,8 @@ export function registerSessionHealth(server: McpServer): void {
       stale_threshold_hours: z.number().optional().describe("Hours before a doc is considered stale. Default: 2"),
     },
     async ({ stale_threshold_hours }) => {
-      const staleHours = stale_threshold_hours ?? 2;
+      const config = getConfig();
+      const staleHours = stale_threshold_hours ?? (config.thresholds.session_stale_minutes / 60);
       const branch = getBranch();
       const dirty = getStatus();
       const dirtyCount = dirty ? dirty.split("\n").filter(Boolean).length : 0;
@@ -59,9 +61,10 @@ export function registerSessionHealth(server: McpServer): void {
       if (dirtyCount > 15) { issues.push(`🚨 ${dirtyCount} uncommitted files — commit now`); severity = "critical"; }
       else if (dirtyCount > 5) { issues.push(`⚠️ ${dirtyCount} uncommitted files — consider committing`); severity = "warning"; }
 
+      const staleMinutes = config.thresholds.session_stale_minutes;
       if (minutesSinceCommit !== null) {
-        if (minutesSinceCommit > 120) { issues.push(`🚨 ${minutesSinceCommit}min since last commit — checkpoint immediately`); severity = "critical"; }
-        else if (minutesSinceCommit > 60) { issues.push(`⚠️ ${minutesSinceCommit}min since last commit — commit soon`); if (severity !== "critical") severity = "warning"; }
+        if (minutesSinceCommit > staleMinutes * 4) { issues.push(`🚨 ${minutesSinceCommit}min since last commit — checkpoint immediately`); severity = "critical"; }
+        else if (minutesSinceCommit > staleMinutes * 2) { issues.push(`⚠️ ${minutesSinceCommit}min since last commit — commit soon`); if (severity !== "critical") severity = "warning"; }
       } else {
         issues.push("⚠️ Could not determine last commit time");
       }

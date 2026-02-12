@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { searchSemantic, listIndexedProjects } from "../lib/timeline-db.js";
+import { getRelatedProjects } from "../lib/config.js";
 import type { SearchScope } from "../types.js";
 
 const RELATIVE_DATE_RE = /^(\d+)(days?|weeks?|months?|years?)$/;
@@ -28,13 +29,6 @@ const TYPE_BADGES: Record<string, string> = {
   sub_agent_spawn: "🚀 sub_agent_spawn",
   error: "⚠️ error",
 };
-
-/** Parse PREFLIGHT_RELATED env var into project paths */
-function getRelatedProjects(): string[] {
-  const related = process.env.PREFLIGHT_RELATED;
-  if (!related) return [];
-  return related.split(",").map(p => p.trim()).filter(Boolean);
-}
 
 /** Get project directories to search based on scope */
 async function getSearchProjects(scope: SearchScope): Promise<string[]> {
