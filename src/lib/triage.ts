@@ -1,431 +1,255 @@
-import { readFileSync, existsSync } from 'fs';
-import { join } from 'path';
-import type { TriageLevel, TriageResult, PreflightConfig } from '../types.js';
+/**
+ * Smart triage classification system for preflight MCP server.
+ * Classifies incoming prompts into categories and returns recommended action.
+ *
+ * Pure function, no side effects, no external dependencies.
+ *
+ * Example classifications:
+ *   "commit"                                                → trivial
+ *   "fix the null check in src/auth/jwt.ts line 42"         → clear
+ *   "fix the auth bug"                                      → ambiguous
+ *   "add tiered rewards" (with rewards-api related)         → cross-service
+ *   "refactor auth to OAuth2 and update all API consumers"  → multi-step
+ */
 
-interface TriageConfig {
-  always_check: string[];
-  skip: string[];
-  cross_service_keywords: string[];
-  strictness: 'relaxed' | 'standard' | 'strict';
+// ── Types ──────────────────────────────────────────────────────────────────
+
+export type TriageLevel =
+  | 'trivial'
+  | 'clear'
+  | 'ambiguous'
+  | 'cross-service'
+  | 'multi-step';
+
+export interface TriageResult {
+  level: TriageLevel;
+  confidence: number;        // 0–1
+  reasons: string[];
+  recommended_tools: string[];
+  cross_service_hits?: string[];
 }
 
-/**
- * Load triage configuration from .preflight/triage.yml or use defaults
- */
-function loadTriageConfig(projectRoot?: string): TriageConfig {
-  const defaults: TriageConfig = {
-    always_check: [],
-    skip: [],
-    cross_service_keywords: [],
-    strictness: 'standard'
-  };
-
-  if (!projectRoot) {
-    return defaults;
-  }
-
-  const configPath = join(projectRoot, '.preflight', 'triage.yml');
-  if (!existsSync(configPath)) {
-    return defaults;
-  }
-
-  try {
-    // Simple YAML parsing for the subset we need
-    const content = readFileSync(configPath, 'utf-8');
-    const config: Partial<TriageConfig> = {};
-    
-    // Parse arrays
-    const parseArray = (key: string): string[] => {
-      const match = content.match(new RegExp(`${key}:\\s*\\n((\\s+-\\s+.+\\n?)*)`));
-      if (!match) return [];
-      return match[1].split('\n').map(line => line.replace(/^\s*-\s+/, '').trim()).filter(Boolean);
-    };
-    
-    // Parse strictness
-    const strictnessMatch = content.match(/strictness:\s*([^\n]+)/);
-    if (strictnessMatch) {
-      const value = strictnessMatch[1].trim().replace(/["']/g, '');
-      if (['relaxed', 'standard', 'strict'].includes(value)) {
-        config.strictness = value as 'relaxed' | 'standard' | 'strict';
-      }
-    }
-
-    return {
-      always_check: parseArray('always_check'),
-      skip: parseArray('skip'),
-      cross_service_keywords: parseArray('cross_service_keywords'),
-      strictness: config.strictness || defaults.strictness
-    };
-  } catch (error) {
-    // If parsing fails, use defaults
-    return defaults;
-  }
+export interface TriageConfig {
+  alwaysCheck?: string[];
+  skip?: string[];
+  crossServiceKeywords?: string[];
+  strictness?: string;       // 'relaxed' | 'standard' | 'strict'
+  relatedAliases?: string[];
 }
 
-/**
- * Check if prompt contains common command patterns for trivial classification
- */
+// ── Constants ──────────────────────────────────────────────────────────────
+
+const TRIVIAL_COMMANDS = [
+  'commit', 'format', 'lint', 'run tests', 'push', 'pull',
+  'status', 'build', 'test', 'deploy', 'start', 'stop', 'restart',
+];
+
+const VAGUE_PRONOUNS = /\b(it|them|the thing|those|these)\b/i;
+
+const VAGUE_VERBS = ['fix', 'update', 'change'];
+
+const CROSS_SERVICE_TERMS = [
+  'schema', 'contract', 'interface', 'event',
+];
+
+const FILE_PATH_RE = /(?:^|[\s,:(])([.\w\-/\\]+\.\w{1,6})\b/;
+const LINE_NUMBER_RE = /\bline\s+\d+|:\d+\b/;
+
+const MULTI_STEP_SEQUENTIAL = /\b(then|after that|first\b.*\bthen|finally)\b/i;
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+function lower(s: string): string {
+  return s.toLowerCase().trim();
+}
+
 function isTrivialCommand(prompt: string): boolean {
-  const trivialCommands = [
-    'commit', 'format', 'lint', 'run tests', 'push', 'pull', 'status',
-    'build', 'test', 'deploy', 'start', 'stop', 'restart'
-  ];
-  
-  const normalizedPrompt = prompt.toLowerCase().trim();
-  return trivialCommands.some(cmd => normalizedPrompt === cmd || normalizedPrompt.startsWith(cmd + ' '));
+  const p = lower(prompt);
+  return TRIVIAL_COMMANDS.some(
+    (cmd) => p === cmd || p.startsWith(cmd + ' '),
+  );
 }
 
-/**
- * Check if prompt is just a file path
- */
-function isFilePath(prompt: string): boolean {
-  const trimmed = prompt.trim();
-  // Basic file path patterns (with extensions)
-  return /^[\w\-./]+\.\w+$/.test(trimmed) || 
-         /^[\w\-./\\]+[\/\\][\w\-./\\]+\.\w+$/.test(trimmed);
+function hasFileRefs(prompt: string): boolean {
+  return FILE_PATH_RE.test(prompt);
 }
 
-/**
- * Check if prompt references specific file paths with extensions
- */
-function hasFileReferences(prompt: string): boolean {
-  // Match file paths with extensions like src/auth/jwt.ts, ./config.json, etc.
-  return /[\w\-./\\]+\.\w{1,4}(?:\s|$|,|:)/.test(prompt);
-}
-
-/**
- * Check if prompt references specific line numbers
- */
 function hasLineNumbers(prompt: string): boolean {
-  return /line\s+\d+|:\d+|@\d+/.test(prompt);
+  return LINE_NUMBER_RE.test(prompt);
 }
 
-/**
- * Check for vague pronouns that indicate ambiguity
- */
 function hasVaguePronouns(prompt: string): boolean {
-  const vaguePronouns = /\b(it|them|the thing|that|those|this|these)\b/i;
-  return vaguePronouns.test(prompt);
+  return VAGUE_PRONOUNS.test(prompt);
 }
 
-/**
- * Check for vague verbs without specific objects
- */
+/** Returns true when a vague verb appears without a concrete target after it. */
 function hasVagueVerbs(prompt: string): boolean {
-  const vagueVerbs = ['fix', 'update', 'change', 'refactor', 'improve', 'optimize'];
-  const words = prompt.toLowerCase().split(/\s+/);
-  
-  return vagueVerbs.some(verb => {
-    const verbIndex = words.indexOf(verb);
-    if (verbIndex === -1) return false;
-    
-    // Check if verb is followed by a specific target (file name, specific noun)
-    const nextWords = words.slice(verbIndex + 1, verbIndex + 4);
-    const hasSpecificTarget = nextWords.some(word => 
-      /\.\w+/.test(word) || // file extension
-      word.length > 6 || // longer words are more likely to be specific
-      /[A-Z]/.test(word) // capitalized words (class names, etc.)
+  const words = lower(prompt).split(/\s+/);
+  return VAGUE_VERBS.some((verb) => {
+    const idx = words.indexOf(verb);
+    if (idx === -1) return false;
+    // Look at the next few words for something concrete
+    const tail = words.slice(idx + 1, idx + 4);
+    const hasTarget = tail.some(
+      (w) => /\.\w+/.test(w) || w.length > 6 || /[A-Z]/.test(w),
     );
-    
-    return !hasSpecificTarget;
+    return !hasTarget;
   });
 }
 
-/**
- * Check if prompt contains cross-service indicators
- */
-function hasCrossServiceIndicators(prompt: string, config: TriageConfig, relatedProjects?: Record<string, string>): string[] {
+function detectCrossService(
+  prompt: string,
+  config: TriageConfig,
+): string[] {
+  const p = lower(prompt);
   const hits: string[] = [];
-  const lowerPrompt = prompt.toLowerCase();
-  
-  // Check config keywords
-  config.cross_service_keywords.forEach(keyword => {
-    if (lowerPrompt.includes(keyword.toLowerCase())) {
-      hits.push(`keyword: ${keyword}`);
-    }
-  });
-  
-  // Check related project aliases
-  if (relatedProjects) {
-    Object.keys(relatedProjects).forEach(alias => {
-      if (lowerPrompt.includes(alias.toLowerCase())) {
-        hits.push(`project: ${alias}`);
-      }
-    });
+
+  for (const kw of config.crossServiceKeywords ?? []) {
+    if (p.includes(lower(kw))) hits.push(`keyword: ${kw}`);
   }
-  
-  // Check common cross-service terms
-  const crossServiceTerms = ['schema', 'contract', 'interface', 'event', 'api', 'endpoint', 'service'];
-  crossServiceTerms.forEach(term => {
-    if (lowerPrompt.includes(term)) {
-      hits.push(`term: ${term}`);
-    }
-  });
-  
+
+  for (const alias of config.relatedAliases ?? []) {
+    if (p.includes(lower(alias))) hits.push(`project: ${alias}`);
+  }
+
+  for (const term of CROSS_SERVICE_TERMS) {
+    if (p.includes(term)) hits.push(`term: ${term}`);
+  }
+
   return hits;
 }
 
-/**
- * Check if prompt indicates multi-step work
- */
 function isMultiStep(prompt: string): boolean {
-  // Check for "and" connecting distinct tasks
-  if (/\band\b/.test(prompt) && prompt.split(' and ').length > 1) {
+  const p = lower(prompt);
+
+  // "and" connecting distinct clauses (heuristic: split and check length)
+  if (p.includes(' and ') && p.split(' and ').length > 1) {
+    const parts = p.split(' and ');
+    // Both sides should be non-trivial (> 2 words each)
+    if (parts.every((part) => part.trim().split(/\s+/).length >= 2)) {
+      return true;
+    }
+  }
+
+  // Sequential language
+  if (MULTI_STEP_SEQUENTIAL.test(prompt)) return true;
+
+  // Numbered / bulleted lists
+  if (/\n\s*[1-9][.)]\s/.test(prompt) || /\n\s*[-*]\s/.test(prompt)) {
     return true;
   }
-  
-  // Check for numbered/bulleted lists in the prompt itself
-  if (/^\s*[1-9]\.|^\s*[-*]/.test(prompt) || prompt.includes('\n1.') || prompt.includes('\n-')) {
-    return true;
+
+  // Multiple file refs in different directories
+  const files = prompt.match(/[\w\-./\\]+\.\w{1,6}/g) ?? [];
+  if (files.length > 1) {
+    const dirs = new Set(files.map((f) => f.split('/')[0]));
+    if (dirs.size > 1) return true;
   }
-  
-  // Check for sequential words
-  const sequentialWords = ['then', 'after that', 'first', 'second', 'next', 'finally'];
-  const hasSequential = sequentialWords.some(word => prompt.toLowerCase().includes(word));
-  if (hasSequential) return true;
-  
-  // Check for multiple file references in different directories
-  const fileMatches = prompt.match(/[\w\-./\\]+\.\w+/g) || [];
-  if (fileMatches.length > 1) {
-    const directories = fileMatches.map(file => file.split('/')[0]).filter((dir, i, arr) => arr.indexOf(dir) === i);
-    return directories.length > 1;
-  }
-  
+
   return false;
 }
 
-/**
- * Classify a prompt into triage levels and return recommendations
- */
-export function triagePrompt(prompt: string, config?: PreflightConfig): TriageResult {
-  const triageConfig = loadTriageConfig();
+// ── Main ───────────────────────────────────────────────────────────────────
+
+export function triagePrompt(
+  prompt: string,
+  config?: TriageConfig,
+): TriageResult {
+  const cfg: TriageConfig = config ?? {};
+  const len = prompt.trim().length;
   const reasons: string[] = [];
-  const recommended_tools: string[] = [];
-  let confidence = 0.8; // Default confidence
-  
-  const promptLength = prompt.trim().length;
-  
-  // Apply config overrides first
-  if (config?.triage) {
-    Object.assign(triageConfig, config.triage);
-  }
-  
-  // Check skip keywords first (highest priority)
-  const skipMatch = triageConfig.skip.find(keyword => 
-    prompt.toLowerCase().includes(keyword.toLowerCase())
-  );
-  if (skipMatch) {
-    reasons.push(`matches skip keyword: ${skipMatch}`);
-    return {
-      level: 'trivial',
-      confidence: 0.9,
-      reasons,
-      recommended_tools: []
-    };
-  }
-  
-  // Check always_check keywords (force ambiguous+)
-  const alwaysCheckMatch = triageConfig.always_check.find(keyword => 
-    prompt.toLowerCase().includes(keyword.toLowerCase())
-  );
-  if (alwaysCheckMatch) {
-    reasons.push(`matches always_check keyword: ${alwaysCheckMatch}`);
-    recommended_tools.push('clarify-intent', 'scope-work');
-    
-    // Still need to check if it's cross-service or multi-step
-    const crossServiceHits = hasCrossServiceIndicators(prompt, triageConfig, config?.related_projects);
-    if (crossServiceHits.length > 0) {
-      reasons.push(`cross-service indicators: ${crossServiceHits.join(', ')}`);
-      recommended_tools.push('search-related-projects');
+  const tools: string[] = [];
+
+  // 1. Skip keywords → trivial immediately
+  for (const kw of cfg.skip ?? []) {
+    if (lower(prompt).includes(lower(kw))) {
       return {
-        level: 'cross-service',
-        confidence: 0.8,
-        reasons,
-        recommended_tools,
-        cross_service_hits: crossServiceHits
+        level: 'trivial',
+        confidence: 0.95,
+        reasons: [`matches skip keyword: "${kw}"`],
+        recommended_tools: [],
       };
     }
-    
-    if (isMultiStep(prompt)) {
-      reasons.push('contains multi-step indicators');
-      recommended_tools.push('sequence-tasks');
-      return {
-        level: 'multi-step',
-        confidence: 0.8,
-        reasons,
-        recommended_tools
-      };
-    }
-    
-    return {
-      level: 'ambiguous',
-      confidence: 0.8,
-      reasons,
-      recommended_tools
-    };
   }
-  
-  // Multi-step check (highest complexity)
+
+  // 2. Multi-step (check early — highest complexity)
   if (isMultiStep(prompt)) {
     reasons.push('contains multi-step indicators');
-    recommended_tools.push('clarify-intent', 'scope-work', 'sequence-tasks');
-    return {
-      level: 'multi-step',
-      confidence: 0.85,
-      reasons,
-      recommended_tools
-    };
+    tools.push('clarify-intent', 'scope-work', 'sequence-tasks');
+    return { level: 'multi-step', confidence: 0.85, reasons, recommended_tools: tools };
   }
-  
-  // Cross-service check
-  const crossServiceHits = hasCrossServiceIndicators(prompt, triageConfig, config?.related_projects);
-  if (crossServiceHits.length > 0) {
-    reasons.push(`cross-service indicators: ${crossServiceHits.join(', ')}`);
-    recommended_tools.push('clarify-intent', 'scope-work', 'search-related-projects');
+
+  // 3. Cross-service
+  const csHits = detectCrossService(prompt, cfg);
+  if (csHits.length > 0) {
+    reasons.push(`cross-service indicators: ${csHits.join(', ')}`);
+    tools.push('clarify-intent', 'scope-work', 'search-related-projects');
     return {
       level: 'cross-service',
       confidence: 0.8,
       reasons,
-      recommended_tools,
-      cross_service_hits: crossServiceHits
+      recommended_tools: tools,
+      cross_service_hits: csHits,
     };
   }
-  
-  // Trivial checks
-  if (promptLength < 20 && isTrivialCommand(prompt)) {
-    reasons.push('short common command');
+
+  // 4. always_check keywords → at least ambiguous
+  for (const kw of cfg.alwaysCheck ?? []) {
+    if (lower(prompt).includes(lower(kw))) {
+      reasons.push(`matches always_check keyword: "${kw}"`);
+      tools.push('clarify-intent', 'scope-work');
+      return { level: 'ambiguous', confidence: 0.8, reasons, recommended_tools: tools };
+    }
+  }
+
+  // 5. Trivial: short common commands
+  if (len < 20 && isTrivialCommand(prompt)) {
     return {
       level: 'trivial',
       confidence: 0.9,
-      reasons,
-      recommended_tools: []
+      reasons: ['short common command'],
+      recommended_tools: [],
     };
   }
-  
-  if (isFilePath(prompt)) {
-    reasons.push('appears to be a file path');
-    return {
-      level: 'trivial',
-      confidence: 0.85,
-      reasons,
-      recommended_tools: []
-    };
+
+  // 6. Ambiguous signals
+  const ambiguousReasons: string[] = [];
+  if (len < 50 && !hasFileRefs(prompt)) {
+    ambiguousReasons.push('short prompt without file references');
   }
-  
-  // Ambiguous checks
-  if (promptLength < 50 && !hasFileReferences(prompt)) {
-    reasons.push('short prompt without file references');
-    confidence = 0.7;
-  }
-  
   if (hasVaguePronouns(prompt)) {
-    reasons.push('contains vague pronouns');
-    confidence = Math.min(confidence, 0.8);
+    ambiguousReasons.push('contains vague pronouns');
   }
-  
   if (hasVagueVerbs(prompt)) {
-    reasons.push('contains vague verbs without specific targets');
-    confidence = Math.min(confidence, 0.75);
+    ambiguousReasons.push('contains vague verbs without specific targets');
   }
-  
-  if (reasons.length > 0) {
-    recommended_tools.push('clarify-intent', 'scope-work');
+
+  if (ambiguousReasons.length > 0) {
     return {
       level: 'ambiguous',
-      confidence,
-      reasons,
-      recommended_tools
+      confidence: 0.7,
+      reasons: ambiguousReasons,
+      recommended_tools: ['clarify-intent', 'scope-work'],
     };
   }
-  
-  // Clear classification (default for specific, well-formed prompts)
-  if (hasFileReferences(prompt)) {
-    reasons.push('references specific file paths');
-    recommended_tools.push('verify-files-exist');
+
+  // 7. Clear — specific, well-formed prompt
+  if (hasFileRefs(prompt)) reasons.push('references specific file paths');
+  if (hasLineNumbers(prompt)) reasons.push('references specific line numbers');
+  if (len > 50) reasons.push('detailed prompt with concrete nouns');
+  if (reasons.length === 0) reasons.push('well-formed prompt with clear intent');
+
+  const clearTools: string[] = hasFileRefs(prompt) ? ['verify-files-exist'] : [];
+
+  // Strictness adjustment
+  if (cfg.strictness === 'strict' && clearTools.length === 0) {
+    clearTools.push('verify-files-exist');
   }
-  
-  if (hasLineNumbers(prompt)) {
-    reasons.push('references specific line numbers');
-  }
-  
-  if (promptLength > 50) {
-    reasons.push('detailed prompt with concrete nouns');
-  }
-  
-  // Apply strictness adjustment
-  if (triageConfig.strictness === 'strict' && recommended_tools.length === 0) {
-    reasons.push('strict mode: adding verification checks');
-    recommended_tools.push('verify-files-exist');
-    confidence = Math.min(confidence, 0.8);
-  } else if (triageConfig.strictness === 'relaxed' && reasons.length === 0) {
-    reasons.push('relaxed mode: assuming clear intent');
-    confidence = Math.min(confidence, 0.9);
-  }
-  
-  if (reasons.length === 0) {
-    reasons.push('well-formed prompt with clear intent');
-  }
-  
+
   return {
     level: 'clear',
-    confidence,
+    confidence: cfg.strictness === 'strict' ? 0.8 : 0.85,
     reasons,
-    recommended_tools
+    recommended_tools: clearTools,
   };
 }
-
-/* 
-Example test cases and expected classifications:
-
-"commit" → trivial
-  - Short common command, < 20 chars
-  - reasons: ["short common command"]
-  - recommended_tools: []
-
-"fix the null check in src/auth/jwt.ts line 42" → clear
-  - Has file reference and line number
-  - reasons: ["references specific file paths", "references specific line numbers"]  
-  - recommended_tools: ["verify-files-exist"]
-
-"fix the auth bug" → ambiguous  
-  - Vague verb without specific target, no file references
-  - reasons: ["contains vague verbs without specific targets"]
-  - recommended_tools: ["clarify-intent", "scope-work"]
-
-"add tiered rewards" (with rewards-api as related project) → cross-service
-  - Would match if "rewards" is in related_projects or cross_service_keywords
-  - reasons: ["cross-service indicators: project: rewards-api"]
-  - recommended_tools: ["clarify-intent", "scope-work", "search-related-projects"]
-  - cross_service_hits: ["project: rewards-api"]
-
-"refactor auth to OAuth2 and update all API consumers" → multi-step
-  - Contains "and" connecting distinct tasks, mentions multiple components
-  - reasons: ["contains multi-step indicators"]
-  - recommended_tools: ["clarify-intent", "scope-work", "sequence-tasks"]
-
-"src/components/Button.tsx" → trivial
-  - Just a file path
-  - reasons: ["appears to be a file path"]
-  - recommended_tools: []
-
-"update it" → ambiguous
-  - Short prompt, vague pronoun, vague verb
-  - reasons: ["short prompt without file references", "contains vague pronouns", "contains vague verbs without specific targets"]
-  - recommended_tools: ["clarify-intent", "scope-work"]
-
-"implement user authentication with JWT tokens in the auth service" → clear
-  - Detailed prompt > 50 chars with concrete nouns
-  - reasons: ["detailed prompt with concrete nouns"]
-  - recommended_tools: []
-
-"fix schema and update contract" (with cross_service_keywords: ["schema", "contract"]) → cross-service  
-  - Contains cross-service keywords
-  - reasons: ["cross-service indicators: keyword: schema, keyword: contract"]
-  - recommended_tools: ["clarify-intent", "scope-work", "search-related-projects"]
-  - cross_service_hits: ["keyword: schema", "keyword: contract"]
-
-"first update the database schema, then migrate the data, and finally update the API" → multi-step
-  - Contains sequential words and multiple distinct tasks
-  - reasons: ["contains multi-step indicators"] 
-  - recommended_tools: ["clarify-intent", "scope-work", "sequence-tasks"]
-*/
