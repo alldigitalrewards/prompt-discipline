@@ -6,6 +6,7 @@ import { insertEvents, getLastIndexedTimestamp, getIndexedProjects, getEventsTab
 import { findSessionDirs, parseAllSessions } from "../lib/session-parser.js";
 import { extractGitHistory } from "../lib/git-extractor.js";
 import { createEmbeddingProvider } from "../lib/embeddings.js";
+import { execSync } from "child_process";
 
 const GIT_DEPTH_MAP: Record<string, number | undefined> = {
   all: undefined,
@@ -24,7 +25,7 @@ export function registerOnboardProject(server: McpServer) {
       openai_api_key: z.string().optional(),
       git_depth: z.enum(["all", "6months", "1year", "3months"]).default("all"),
       git_since: z.string().optional().describe("Override git_depth with exact start date (ISO: '2025-08-01')"),
-      git_authors: z.array(z.string()).optional().describe("Filter git commits to these authors only (e.g., ['Jack', 'claude'])"),
+      git_authors: z.array(z.string()).optional().describe("Filter git commits to these authors. If omitted, auto-detects the primary author (most commits)."),
       reindex: z.boolean().default(false).describe("If true, drop existing data and rebuild from scratch"),
     },
     async (params) => {
@@ -41,6 +42,38 @@ export function registerOnboardProject(server: McpServer) {
       const projectName = path.basename(project_dir);
       const progress: string[] = [];
       progress.push(`🔍 Onboarding project: **${projectName}** (${project_dir})`);
+
+      // Auto-detect git authors if not provided
+      let effectiveAuthors = git_authors;
+      if (!effectiveAuthors || effectiveAuthors.length === 0) {
+        try {
+          // Get the configured git user for this repo
+          const gitUser = execSync("git config user.name", { cwd: project_dir, encoding: "utf-8" }).trim();
+          if (gitUser) {
+            // Also find authors with >5% of commits to include collaborators
+            const authorCounts = execSync(
+              'git log --all --format="%an" | sort | uniq -c | sort -rn | head -10',
+              { cwd: project_dir, encoding: "utf-8", maxBuffer: 1024 * 1024 }
+            ).trim().split("\n").map(line => {
+              const match = line.trim().match(/^(\d+)\s+(.+)$/);
+              return match ? { count: parseInt(match[1]), name: match[2] } : null;
+            }).filter(Boolean) as { count: number; name: string }[];
+
+            const totalCommits = authorCounts.reduce((s, a) => s + a.count, 0);
+            // Include git user + any author with >5% of commits (skip bots)
+            const botPatterns = /\[bot\]|dependabot|renovate|github-actions/i;
+            effectiveAuthors = authorCounts
+              .filter(a => (a.name === gitUser || a.count / totalCommits > 0.05) && !botPatterns.test(a.name))
+              .map(a => a.name);
+
+            if (effectiveAuthors.length === 0) effectiveAuthors = [gitUser];
+            progress.push(`👤 Auto-detected authors: ${effectiveAuthors.join(", ")} (from git config + commit history)`);
+          }
+        } catch {
+          // If auto-detect fails, include all authors
+          progress.push("👤 Could not auto-detect authors — including all commits");
+        }
+      }
 
       // 2. Find Claude session dir
       const sessionDirs = findSessionDirs();
@@ -98,9 +131,9 @@ export function registerOnboardProject(server: McpServer) {
         maxCount: 10000,
       });
 
-      // Filter by authors if specified
-      if (git_authors && git_authors.length > 0) {
-        const authorPatterns = git_authors.map(a => a.toLowerCase());
+      // Filter by authors
+      if (effectiveAuthors && effectiveAuthors.length > 0) {
+        const authorPatterns = effectiveAuthors.map(a => a.toLowerCase());
         const beforeCount = gitEvents.length;
         gitEvents = gitEvents.filter((e: any) => {
           try {
@@ -109,7 +142,7 @@ export function registerOnboardProject(server: McpServer) {
             return authorPatterns.some(p => author.includes(p));
           } catch { return true; }
         });
-        progress.push(`👤 Filtered to authors [${git_authors.join(", ")}]: ${gitEvents.length}/${beforeCount} commits`);
+        progress.push(`👤 Filtered to authors [${effectiveAuthors.join(", ")}]: ${gitEvents.length}/${beforeCount} commits`);
       }
 
       progress.push(`📦 Found ${gitEvents.length} new git events`);
