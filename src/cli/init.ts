@@ -121,57 +121,6 @@ async function main(): Promise<void> {
 
   await writeFile(mcpPath, JSON.stringify(config, null, 2) + "\n");
 
-  // Offer to create .preflight/ config directory
-  const preflightDir = join(process.cwd(), ".preflight");
-  if (!existsSync(preflightDir)) {
-    const createConfig = await ask("\nCreate .preflight/ config directory with template files? [y/N]: ");
-    if (createConfig.trim().toLowerCase() === "y") {
-      await mkdir(preflightDir, { recursive: true });
-
-      const configYml = `# Preflight configuration
-profile: ${profile}
-
-related_projects: []
-# - path: /path/to/related/project
-#   alias: project-name
-
-thresholds:
-  session_stale_minutes: 30
-  max_tool_calls_before_checkpoint: 100
-  correction_pattern_threshold: 3
-
-embeddings:
-  provider: local
-`;
-
-      const triageYml = `# Triage rules for prompt classification
-rules:
-  always_check:
-    - rewards
-    - permissions
-    - migration
-    - schema
-  skip:
-    - commit
-    - format
-    - lint
-  cross_service_keywords:
-    - auth
-    - notification
-    - event
-    - webhook
-
-strictness: standard
-`;
-
-      await writeFile(join(preflightDir, "config.yml"), configYml);
-      await writeFile(join(preflightDir, "triage.yml"), triageYml);
-      console.log("✅ Created .preflight/config.yml and .preflight/triage.yml");
-    }
-  } else {
-    console.log("\n.preflight/ directory already exists — skipping.");
-  }
-
   console.log(`\n✅ preflight added! (profile: ${profile})`);
   console.log("Restart Claude Code to connect.\n");
 
