@@ -42,3 +42,22 @@ export interface RunError {
   stderr: string;
   stdout: string;
 }
+
+/** Per-project metadata stored alongside the LanceDB */
+export interface ProjectMeta {
+  project_dir: string;
+  onboarded_at: string;
+  event_count: number;
+}
+
+/** Project registry entry in index.json */
+export interface ProjectRegistryEntry {
+  hash: string;
+  onboarded_at: string;
+}
+
+/** Project registry mapping absolute paths to metadata */
+export type ProjectRegistry = Record<string, ProjectRegistryEntry>;
+
+/** Search scope for timeline queries */
+export type SearchScope = "current" | "related" | "all";

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { searchSemantic } from "../lib/timeline-db.js";
+import { searchSemantic, listIndexedProjects } from "../lib/timeline-db.js";
+import type { SearchScope } from "../types.js";
 
 const RELATIVE_DATE_RE = /^(\d+)(days?|weeks?|months?|years?)$/;
 
@@ -28,13 +29,42 @@ const TYPE_BADGES: Record<string, string> = {
   error: "⚠️ error",
 };
 
+/** Parse PREFLIGHT_RELATED env var into project paths */
+function getRelatedProjects(): string[] {
+  const related = process.env.PREFLIGHT_RELATED;
+  if (!related) return [];
+  return related.split(",").map(p => p.trim()).filter(Boolean);
+}
+
+/** Get project directories to search based on scope */
+async function getSearchProjects(scope: SearchScope): Promise<string[]> {
+  const currentProject = process.env.CLAUDE_PROJECT_DIR;
+  
+  switch (scope) {
+    case "current":
+      return currentProject ? [currentProject] : [];
+      
+    case "related":
+      const related = getRelatedProjects();
+      return currentProject ? [currentProject, ...related] : related;
+      
+    case "all":
+      const projects = await listIndexedProjects();
+      return projects.map(p => p.project);
+      
+    default:
+      return currentProject ? [currentProject] : [];
+  }
+}
+
 export function registerSearchHistory(server: McpServer) {
   server.tool(
     "search_history",
     "Semantic search across the unified timeline of prompts, commits, corrections, and tool calls. Find relevant events using natural language queries.",
     {
       query: z.string().describe("Natural language search query"),
-      project: z.string().optional().describe("Filter to a specific project name"),
+      scope: z.enum(["current", "related", "all"]).default("current").describe("Search scope: current project, related projects (PREFLIGHT_RELATED), or all indexed projects"),
+      project: z.string().optional().describe("Filter to a specific project name (overrides scope)"),
       branch: z.string().optional(),
       author: z.string().optional().describe("Filter commits to this author (partial match, case-insensitive)"),
       type: z.enum(["prompt", "assistant", "correction", "commit", "tool_call", "compaction", "sub_agent_spawn", "error", "all"]).default("all"),
@@ -46,8 +76,27 @@ export function registerSearchHistory(server: McpServer) {
       const since = params.since ? parseRelativeDate(params.since) : undefined;
       const until = params.until ? parseRelativeDate(params.until) : undefined;
 
+      // Determine which projects to search
+      let projectDirs: string[];
+      if (params.project) {
+        // Specific project overrides scope
+        projectDirs = [params.project];
+      } else {
+        projectDirs = await getSearchProjects(params.scope);
+      }
+
+      if (projectDirs.length === 0) {
+        return { 
+          content: [{ 
+            type: "text", 
+            text: `## Search Results for "${params.query}"\n_No projects found for scope "${params.scope}". Make sure CLAUDE_PROJECT_DIR is set or projects are onboarded._` 
+          }] 
+        };
+      }
+
       let results = await searchSemantic(params.query, {
-        project: params.project,
+        project_dirs: projectDirs,
+        project: undefined, // Don't filter by single project when using project_dirs
         branch: params.branch,
         type: params.type === "all" ? undefined : params.type,
         since,

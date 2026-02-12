@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // =============================================================================
-// preflight-dev init — Zero-config MCP server setup for Claude Code
+// preflight init — Zero-config MCP server setup for Claude Code
 // =============================================================================
 
 import { createInterface } from "node:readline";
@@ -22,7 +22,7 @@ interface McpConfig {
 }
 
 async function main(): Promise<void> {
-  console.log("\n✈️ preflight-dev — MCP server setup\n");
+  console.log("\n✈️ preflight — MCP server setup\n");
 
   const mcpPath = join(process.cwd(), ".mcp.json");
   let config: McpConfig;
@@ -75,13 +75,13 @@ async function main(): Promise<void> {
   // So use a different approach: command runs the server
   config.mcpServers["preflight"] = {
     command: "npx",
-    args: ["-y", "tsx", "node_modules/preflight-dev/src/index.ts"],
+    args: ["-y", "tsx", "node_modules/preflight/src/index.ts"],
     env,
   };
 
   await writeFile(mcpPath, JSON.stringify(config, null, 2) + "\n");
 
-  console.log(`\n✅ preflight-dev added! (profile: ${profile})`);
+  console.log(`\n✅ preflight added! (profile: ${profile})`);
   console.log("Restart Claude Code to connect.\n");
 
   rl.close();

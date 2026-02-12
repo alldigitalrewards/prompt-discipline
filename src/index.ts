@@ -44,7 +44,7 @@ import { registerGenerateScorecard } from "./tools/generate-scorecard.js";
 
 const profile = getProfile();
 const server = new McpServer({
-  name: "preflight-dev",
+  name: "preflight",
   version: "3.0.0",
 });
 
@@ -82,11 +82,11 @@ for (const [name, register] of toolRegistry) {
   }
 }
 
-process.stderr.write(`preflight-dev: profile=${profile}, tools=${registered}\n`);
+process.stderr.write(`preflight: profile=${profile}, tools=${registered}\n`);
 
 // Graceful shutdown
 function shutdown() {
-  process.stderr.write("preflight-dev: shutting down\n");
+  process.stderr.write("preflight: shutting down\n");
   process.exit(0);
 }
 process.on("SIGINT", shutdown);
@@ -96,8 +96,8 @@ process.on("SIGTERM", shutdown);
 try {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  process.stderr.write("preflight-dev: server started\n");
+  process.stderr.write("preflight: server started\n");
 } catch (err) {
-  process.stderr.write(`preflight-dev: failed to start — ${err}\n`);
+  process.stderr.write(`preflight: failed to start — ${err}\n`);
   process.exit(1);
 }

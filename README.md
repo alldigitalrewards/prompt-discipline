@@ -1,6 +1,6 @@
 <div align="center">
 
-# ✈️ preflight-dev
+# ✈️ preflight
 
 **Preflight checks for your AI coding prompts.**
 
@@ -45,7 +45,7 @@ The pattern is always the same: vague prompt → Claude guesses → wrong output
      → You correct it, 3 more rounds
      → 12,000 tokens burned
 
-✅  preflight-dev intercepts → clarify_intent fires
+✅  preflight intercepts → clarify_intent fires
      → "Which auth bug? I see 3 open issues:
         1. JWT expiry not refreshing (src/auth/jwt.ts)
         2. OAuth callback 404 (src/auth/oauth.ts)  
@@ -58,8 +58,8 @@ The pattern is always the same: vague prompt → Claude guesses → wrong output
 
 **1. Clone & install:**
 ```bash
-git clone https://github.com/TerminalGravity/preflight-dev.git
-cd preflight-dev && npm install
+git clone https://github.com/TerminalGravity/preflight.git
+cd preflight && npm install
 ```
 
 **2. Add to your Claude Code config** (`.claude/settings.json` or project `.mcp.json`):
@@ -68,8 +68,8 @@ cd preflight-dev && npm install
   "mcpServers": {
     "preflight": {
       "command": "npx",
-      "args": ["tsx", "/path/to/preflight-dev/src/index.ts"],
-      "cwd": "/path/to/preflight-dev",
+      "args": ["tsx", "/path/to/preflight/src/index.ts"],
+      "cwd": "/path/to/preflight",
       "env": {
         "CLAUDE_PROJECT_DIR": "/path/to/your/project"
       }
@@ -116,7 +116,7 @@ cd preflight-dev && npm install
 
 ## Timeline Intelligence
 
-This is the feature that makes preflight-dev more than a linter.
+This is the feature that makes preflight more than a linter.
 
 When you run `onboard_project` for a specific project, the server finds that project's session history (JSONL files in `~/.claude/projects/<encoded-path>/`) and indexes its events into a local [LanceDB](https://lancedb.github.io/lancedb/) database with vector embeddings. Run it once per project you want to search — each project's data stays tagged so you can query across them or filter to one.
 
@@ -131,7 +131,7 @@ No data leaves your machine. Embeddings run locally by default (Xenova/transform
 ## Architecture
 
 ```
-Claude Code ←→ MCP Protocol ←→ preflight-dev server
+Claude Code ←→ MCP Protocol ←→ preflight server
                                       │
                     ┌─────────────────┼─────────────────┐
                     │                 │                  │
@@ -163,7 +163,7 @@ Claude Code ←→ MCP Protocol ←→ preflight-dev server
 
 ## Contributing
 
-This project is young and there's plenty to do. Check the [issues](https://github.com/TerminalGravity/preflight-dev/issues) — several are tagged `good first issue`.
+This project is young and there's plenty to do. Check the [issues](https://github.com/TerminalGravity/preflight/issues) — several are tagged `good first issue`.
 
 PRs welcome. No CLA, no bureaucracy. If it makes the tool better, it gets merged.
 

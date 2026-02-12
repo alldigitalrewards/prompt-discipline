@@ -2,7 +2,15 @@ import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as fs from "fs";
 import * as path from "path";
-import { insertEvents, getLastIndexedTimestamp, getIndexedProjects, getEventsTable } from "../lib/timeline-db.js";
+import { 
+  insertEvents, 
+  getLastIndexedTimestamp, 
+  listIndexedProjects, 
+  getEventsTable,
+  registerProject,
+  loadProjectMeta,
+  saveProjectMeta 
+} from "../lib/timeline-db.js";
 import { findSessionDirs, parseAllSessions } from "../lib/session-parser.js";
 import { extractGitHistory } from "../lib/git-extractor.js";
 import { createEmbeddingProvider } from "../lib/embeddings.js";
@@ -89,8 +97,15 @@ export function registerOnboardProject(server: McpServer) {
         progress.push("♻️ Reindex requested — rebuilding from scratch");
         // Drop existing data for this project
         try {
-          const table = await getEventsTable();
-          await table.delete(`project = "${projectName}"`);
+          const table = await getEventsTable(project_dir);
+          await table.delete(`project = "${project_dir}"`);
+          // Reset project metadata
+          const meta = {
+            project_dir: project_dir,
+            onboarded_at: new Date().toISOString(),
+            event_count: 0,
+          };
+          await saveProjectMeta(project_dir, meta);
         } catch {
           // Table may not exist yet
         }
@@ -175,8 +190,8 @@ export function registerOnboardProject(server: McpServer) {
         progress.push(`  Embedding batch ${batchNum}/${totalBatches}...`);
       }
 
-      // 7. Insert into LanceDB
-      await insertEvents(allEvents);
+      // 7. Insert into LanceDB (specify the project directory)
+      await insertEvents(allEvents, project_dir);
       progress.push("💾 Inserted into database");
 
       // 8. Summary
@@ -185,10 +200,9 @@ export function registerOnboardProject(server: McpServer) {
       const corrections = allEvents.filter((e: any) => e.type === "correction").length;
       const others = allEvents.length - prompts - commits - corrections;
 
-      // Get total count
-      const projects = await getIndexedProjects();
-      const thisProject = projects.find((p) => p.project === projectName);
-      const totalEvents = thisProject?.event_count ?? allEvents.length;
+      // Get total count from project metadata
+      const meta = await loadProjectMeta(project_dir);
+      const totalEvents = meta?.event_count ?? allEvents.length;
 
       progress.push(
         `\n✅ Indexed **${allEvents.length}** new events (${prompts} prompts, ${commits} commits, ${corrections} corrections${others > 0 ? `, ${others} other` : ""}). Total: **${totalEvents}** events.`

@@ -13,7 +13,7 @@ interface ScoreHistory {
   sessionStart: string;
 }
 
-const STATE_DIR = join(homedir(), ".preflight-dev");
+const STATE_DIR = join(homedir(), ".preflight");
 const STATE_FILE = join(STATE_DIR, "score-history.json");
 
 async function loadHistory(): Promise<ScoreHistory> {
