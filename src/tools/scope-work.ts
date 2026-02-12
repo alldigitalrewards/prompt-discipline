@@ -3,9 +3,10 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { run, getBranch, getRecentCommits, getStatus } from "../lib/git.js";
 import { readIfExists, findWorkspaceDocs, PROJECT_DIR } from "../lib/files.js";
+import { searchSemantic } from "../lib/timeline-db.js";
 import { now } from "../lib/state.js";
 import { existsSync } from "fs";
-import { join, normalize, resolve } from "path";
+import { join, normalize, resolve, basename } from "path";
 
 const STOP_WORDS = new Set([
   "the", "and", "for", "with", "from", "that", "this", "should", "would", "could",
@@ -40,6 +41,49 @@ function parsePortelainFiles(porcelain: string): string[] {
 function isSafePath(dir: string): boolean {
   const resolved = resolve(PROJECT_DIR, dir);
   return resolved.startsWith(resolve(PROJECT_DIR));
+}
+
+/** Get related projects from PREFLIGHT_RELATED env var */
+function getRelatedProjects(): string[] {
+  const related = process.env.PREFLIGHT_RELATED;
+  if (!related) return [];
+  return related.split(",").map(p => p.trim()).filter(Boolean);
+}
+
+/** Search for relevant cross-project context for scoping */
+async function searchRelatedProjectContext(task: string): Promise<string[]> {
+  const relatedProjects = getRelatedProjects();
+  if (relatedProjects.length === 0) return [];
+
+  // Generate targeted search queries for scoping
+  const queries = [
+    `${task} interface type definition`,
+    `${task} API endpoint service`,
+    `${task} component hook pattern`,
+    `${task} database schema model`,
+  ];
+
+  const contextItems: string[] = [];
+  
+  for (const query of queries) {
+    try {
+      const results = await searchSemantic(query, {
+        project_dirs: relatedProjects,
+        limit: 2,
+      });
+
+      for (const result of results) {
+        const projectName = basename(result.project);
+        const content = result.content.slice(0, 150);
+        const fileInfo = result.source_file ? ` (${result.source_file})` : "";
+        contextItems.push(`- **${projectName}:** ${content}${fileInfo}`);
+      }
+    } catch {
+      // Skip if search fails
+    }
+  }
+
+  return contextItems.slice(0, 4); // Limit to top 4 context items
 }
 
 export function registerScopeWork(server: McpServer): void {
@@ -125,6 +169,9 @@ export function registerScopeWork(server: McpServer): void {
         ? docEntries.map(([name]) => `- \`${name}\``).join("\n")
         : "- (none found)";
 
+      // Get cross-project context
+      const relatedContext = await searchRelatedProjectContext(task);
+
       const plan = `# 📋 Scope Work Plan
 **Generated:** ${timestamp}
 **Task:** ${task}
@@ -156,6 +203,7 @@ ${docLines}
 ${claudeMd ? "- `CLAUDE.md` exists (project instructions)" : ""}
 ${agentsMd ? "- `.claude/AGENTS.md` exists" : ""}
 
+${relatedContext.length > 0 ? `## 🔗 Related Project Context\n${relatedContext.join("\n")}\n` : ""}
 ---
 
 ## 📝 Execution Plan

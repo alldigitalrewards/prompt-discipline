@@ -62,7 +62,8 @@ export function registerTimeline(server: McpServer) {
     "timeline",
     "Chronological view of project events grouped by day. Shows prompts, responses, tool calls, corrections, and commits in order.",
     {
-      project: z.string().optional(),
+      scope: z.enum(["current", "related", "all"]).default("current").describe("Search scope: current project, related projects (PREFLIGHT_RELATED), or all indexed projects"),
+      project: z.string().optional().describe("Filter to a specific project name (overrides scope)"),
       branch: z.string().optional(),
       author: z.string().optional().describe("Filter commits to this author (partial match, case-insensitive)"),
       since: z.string().optional(),
@@ -75,8 +76,27 @@ export function registerTimeline(server: McpServer) {
       const since = params.since ? parseRelativeDate(params.since) : undefined;
       const until = params.until ? parseRelativeDate(params.until) : undefined;
 
+      // Determine which projects to search
+      let projectDirs: string[];
+      if (params.project) {
+        // Specific project overrides scope
+        projectDirs = [params.project];
+      } else {
+        projectDirs = await getSearchProjects(params.scope);
+      }
+
+      if (projectDirs.length === 0) {
+        return { 
+          content: [{ 
+            type: "text", 
+            text: `## Timeline\n_No projects found for scope "${params.scope}". Make sure CLAUDE_PROJECT_DIR is set or projects are onboarded._` 
+          }] 
+        };
+      }
+
       let events = await getTimeline({
-        project: params.project,
+        project_dirs: projectDirs,
+        project: undefined, // Don't filter by single project when using project_dirs
         branch: params.branch,
         since,
         until,

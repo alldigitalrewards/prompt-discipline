@@ -2,8 +2,9 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { run, getBranch, getStatus, getRecentCommits, getDiffFiles, getStagedFiles } from "../lib/git.js";
 import { findWorkspaceDocs, PROJECT_DIR } from "../lib/files.js";
+import { searchSemantic } from "../lib/timeline-db.js";
 import { existsSync, readFileSync } from "fs";
-import { join } from "path";
+import { join, basename } from "path";
 
 /** Parse test failures from common report formats without fragile shell pipelines */
 function getTestFailures(): string {
@@ -87,6 +88,50 @@ function extractSignals(msg: string, context: { hasTypeErrors: boolean; hasTestF
   return signals;
 }
 
+/** Get related projects from PREFLIGHT_RELATED env var */
+function getRelatedProjects(): string[] {
+  const related = process.env.PREFLIGHT_RELATED;
+  if (!related) return [];
+  return related.split(",").map(p => p.trim()).filter(Boolean);
+}
+
+/** Search for relevant cross-project context */
+async function searchCrossProjectContext(userMessage: string): Promise<string[]> {
+  const relatedProjects = getRelatedProjects();
+  if (relatedProjects.length === 0) return [];
+
+  // Generate search queries for schemas, types, contracts, APIs
+  const queries = [
+    `${userMessage} type interface schema`,
+    `${userMessage} API endpoint contract`,
+    `${userMessage} enum constant definition`,
+    `${userMessage} class function method`,
+  ];
+
+  const contextItems: string[] = [];
+  
+  for (const query of queries) {
+    try {
+      const results = await searchSemantic(query, {
+        project_dirs: relatedProjects,
+        type: "commit", // Focus on code changes
+        limit: 3,
+      });
+
+      for (const result of results) {
+        const projectName = basename(result.project);
+        const content = result.content.slice(0, 200);
+        const sourceInfo = result.source_file ? ` at ${result.source_file}` : "";
+        contextItems.push(`**From ${projectName}:** ${content}${sourceInfo}`);
+      }
+    } catch {
+      // Skip if search fails
+    }
+  }
+
+  return contextItems.slice(0, 5); // Limit to top 5 context items
+}
+
 export function registerClarifyIntent(server: McpServer): void {
   server.tool(
     "clarify_intent",
@@ -136,6 +181,12 @@ export function registerClarifyIntent(server: McpServer): void {
         hasTestFailures,
         hasDirtyFiles: dirtyCount > 0,
       });
+
+      // Search for cross-project context
+      const crossProjectContext = await searchCrossProjectContext(user_message);
+      if (crossProjectContext.length > 0) {
+        sections.push(`## Related Project Context\n${crossProjectContext.map(c => `- ${c}`).join("\n")}`);
+      }
 
       sections.push(`## Intent Signals\n${signals.map(s => `- ${s}`).join("\n")}`);
       sections.push(`## Recommendation\n1. **Proceed with specifics** — state what you'll do and why\n2. **Ask ONE question** — if context doesn't disambiguate`);

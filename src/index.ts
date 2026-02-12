@@ -6,6 +6,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { isToolEnabled, getProfile } from "./profiles.js";
+import { existsSync } from "fs";
 
 // Category 1: Plans
 import { registerScopeWork } from "./tools/scope-work.js";
@@ -41,6 +42,30 @@ import { registerSearchHistory } from "./tools/search-history.js";
 import { registerTimeline } from "./tools/timeline-view.js";
 import { registerScanSessions } from "./tools/scan-sessions.js";
 import { registerGenerateScorecard } from "./tools/generate-scorecard.js";
+
+// Parse and validate PREFLIGHT_RELATED environment variable
+function validateRelatedProjects(): void {
+  const related = process.env.PREFLIGHT_RELATED;
+  if (!related) return;
+
+  const projects = related.split(",").map(p => p.trim()).filter(Boolean);
+  const invalid: string[] = [];
+  
+  for (const projectPath of projects) {
+    if (!existsSync(projectPath)) {
+      invalid.push(projectPath);
+    }
+  }
+  
+  if (invalid.length > 0) {
+    process.stderr.write(`preflight-dev: warning - PREFLIGHT_RELATED contains invalid paths: ${invalid.join(", ")}\n`);
+  } else if (projects.length > 0) {
+    process.stderr.write(`preflight-dev: related projects: ${projects.length} configured\n`);
+  }
+}
+
+// Validate related projects on startup
+validateRelatedProjects();
 
 const profile = getProfile();
 const server = new McpServer({
