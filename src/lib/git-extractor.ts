@@ -7,9 +7,15 @@ import { join } from "path";
 import { randomUUID } from "crypto";
 import type { TimelineEvent } from "./session-parser.js";
 
-const COMMIT_SEP = "%%COMMIT_START%%";
-const COMMIT_END = "%%COMMIT_END%%";
-const FIELD_SEP = "%%F%%";
+// In git --format, %% produces a literal %. So we use %%…%% in the format
+// string, but the actual output contains %…%. We need separate constants.
+const COMMIT_SEP_FMT = "%%COMMIT_START%%";
+const COMMIT_END_FMT = "%%COMMIT_END%%";
+const FIELD_SEP_FMT = "%%F%%";
+// What appears in the output after git processes the format:
+const COMMIT_SEP = "%COMMIT_START%";
+const COMMIT_END = "%COMMIT_END%";
+const FIELD_SEP = "%F%";
 
 /**
  * Extract git commits as TimelineEvent[].
@@ -44,7 +50,7 @@ export function extractGitHistory(
 
   // Format: structured fields separated by known delimiters
   args.push(
-    `--format=${COMMIT_SEP}${FIELD_SEP}%H${FIELD_SEP}%aI${FIELD_SEP}%an${FIELD_SEP}%s${FIELD_SEP}%b${FIELD_SEP}${COMMIT_END}`,
+    `--format=${COMMIT_SEP_FMT}${FIELD_SEP_FMT}%H${FIELD_SEP_FMT}%aI${FIELD_SEP_FMT}%an${FIELD_SEP_FMT}%s${FIELD_SEP_FMT}%b${FIELD_SEP_FMT}${COMMIT_END_FMT}`,
     "--stat",
   );
 

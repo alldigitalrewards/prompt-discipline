@@ -36,6 +36,7 @@ export function registerSearchHistory(server: McpServer) {
       query: z.string().describe("Natural language search query"),
       project: z.string().optional().describe("Filter to a specific project name"),
       branch: z.string().optional(),
+      author: z.string().optional().describe("Filter commits to this author (partial match, case-insensitive)"),
       type: z.enum(["prompt", "assistant", "correction", "commit", "tool_call", "compaction", "sub_agent_spawn", "error", "all"]).default("all"),
       since: z.string().optional().describe("ISO date or relative: '2025-06-01', '3months'"),
       until: z.string().optional().describe("ISO date or relative"),
@@ -45,14 +46,25 @@ export function registerSearchHistory(server: McpServer) {
       const since = params.since ? parseRelativeDate(params.since) : undefined;
       const until = params.until ? parseRelativeDate(params.until) : undefined;
 
-      const results = await searchSemantic(params.query, {
+      let results = await searchSemantic(params.query, {
         project: params.project,
         branch: params.branch,
         type: params.type === "all" ? undefined : params.type,
         since,
         until,
-        limit: params.limit,
+        limit: params.author ? params.limit * 3 : params.limit, // over-fetch if filtering by author
       });
+
+      // Post-filter by author (stored in metadata JSON)
+      if (params.author) {
+        const authorLower = params.author.toLowerCase();
+        results = results.filter((r: any) => {
+          try {
+            const meta = JSON.parse(r.metadata || "{}");
+            return (meta.author || "").toLowerCase().includes(authorLower);
+          } catch { return false; }
+        }).slice(0, params.limit);
+      }
 
       if (results.length === 0) {
         return { content: [{ type: "text", text: `## Search Results for "${params.query}"\n_No results found._` }] };

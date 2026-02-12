@@ -35,6 +35,7 @@ export function registerTimeline(server: McpServer) {
     {
       project: z.string().optional(),
       branch: z.string().optional(),
+      author: z.string().optional().describe("Filter commits to this author (partial match, case-insensitive)"),
       since: z.string().optional(),
       until: z.string().optional(),
       type: z.enum(["prompt", "assistant", "correction", "commit", "tool_call", "compaction", "sub_agent_spawn", "error", "all"]).default("all"),
@@ -45,7 +46,7 @@ export function registerTimeline(server: McpServer) {
       const since = params.since ? parseRelativeDate(params.since) : undefined;
       const until = params.until ? parseRelativeDate(params.until) : undefined;
 
-      const events = await getTimeline({
+      let events = await getTimeline({
         project: params.project,
         branch: params.branch,
         since,
@@ -54,6 +55,18 @@ export function registerTimeline(server: McpServer) {
         limit: params.limit,
         offset: params.offset,
       });
+
+      // Post-filter by author
+      if (params.author) {
+        const authorLower = params.author.toLowerCase();
+        events = events.filter((e: any) => {
+          if (e.type !== "commit") return true; // only filter commits
+          try {
+            const meta = JSON.parse(e.metadata || "{}");
+            return (meta.author || "").toLowerCase().includes(authorLower);
+          } catch { return true; }
+        });
+      }
 
       if (events.length === 0) {
         return { content: [{ type: "text", text: "## Timeline\n_No events found for the given filters._" }] };

@@ -23,10 +23,12 @@ export function registerOnboardProject(server: McpServer) {
       embedding_provider: z.enum(["local", "openai"]).default("local"),
       openai_api_key: z.string().optional(),
       git_depth: z.enum(["all", "6months", "1year", "3months"]).default("all"),
+      git_since: z.string().optional().describe("Override git_depth with exact start date (ISO: '2025-08-01')"),
+      git_authors: z.array(z.string()).optional().describe("Filter git commits to these authors only (e.g., ['Jack', 'claude'])"),
       reindex: z.boolean().default(false).describe("If true, drop existing data and rebuild from scratch"),
     },
     async (params) => {
-      const { project_dir, embedding_provider, openai_api_key, git_depth, reindex } = params;
+      const { project_dir, embedding_provider, openai_api_key, git_depth, git_since, git_authors, reindex } = params;
 
       // 1. Validate project_dir
       if (!fs.existsSync(project_dir)) {
@@ -83,12 +85,33 @@ export function registerOnboardProject(server: McpServer) {
       }
 
       // 5. Extract git history
-      const depthDays = GIT_DEPTH_MAP[git_depth];
-      const gitSinceDate = gitSince ?? (depthDays ? new Date(Date.now() - depthDays * 86400000) : undefined);
-      const gitEvents = extractGitHistory(project_dir, {
+      let gitSinceDate: Date | undefined;
+      if (git_since) {
+        gitSinceDate = new Date(git_since);
+        progress.push(`📅 Git history since ${git_since}`);
+      } else {
+        const depthDays = GIT_DEPTH_MAP[git_depth];
+        gitSinceDate = gitSince ?? (depthDays ? new Date(Date.now() - depthDays * 86400000) : undefined);
+      }
+      let gitEvents = extractGitHistory(project_dir, {
         since: gitSinceDate,
-        maxCount: depthDays ? undefined : 10000,
+        maxCount: 10000,
       });
+
+      // Filter by authors if specified
+      if (git_authors && git_authors.length > 0) {
+        const authorPatterns = git_authors.map(a => a.toLowerCase());
+        const beforeCount = gitEvents.length;
+        gitEvents = gitEvents.filter((e: any) => {
+          try {
+            const meta = JSON.parse(e.metadata || "{}");
+            const author = (meta.author || "").toLowerCase();
+            return authorPatterns.some(p => author.includes(p));
+          } catch { return true; }
+        });
+        progress.push(`👤 Filtered to authors [${git_authors.join(", ")}]: ${gitEvents.length}/${beforeCount} commits`);
+      }
+
       progress.push(`📦 Found ${gitEvents.length} new git events`);
 
       const allEvents = [...sessionEvents, ...gitEvents];
