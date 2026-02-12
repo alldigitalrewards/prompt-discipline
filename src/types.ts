@@ -61,3 +61,27 @@ export type ProjectRegistry = Record<string, ProjectRegistryEntry>;
 
 /** Search scope for timeline queries */
 export type SearchScope = "current" | "related" | "all";
+
+/** Triage classification levels for prompt analysis */
+export type TriageLevel = 'trivial' | 'clear' | 'ambiguous' | 'cross-service' | 'multi-step';
+
+/** Result from triage classification with recommendations */
+export interface TriageResult {
+  level: TriageLevel;
+  confidence: number; // 0-1
+  reasons: string[];  // why this classification
+  recommended_tools: string[]; // which tools should fire
+  cross_service_hits?: string[]; // which related projects matched
+}
+
+/** Configuration for preflight checks and triage system */
+export interface PreflightConfig {
+  related_projects?: Record<string, string>; // alias -> path mapping
+  triage?: {
+    always_check?: string[];
+    skip?: string[];
+    cross_service_keywords?: string[];
+    strictness?: 'relaxed' | 'standard' | 'strict';
+  };
+  correction_pattern_count?: number;
+}
