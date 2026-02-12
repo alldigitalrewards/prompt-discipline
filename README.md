@@ -1,34 +1,67 @@
-# prompt-discipline MCP Server
+<div align="center">
 
-14-tool Model Context Protocol server for prompt discipline enforcement in Claude Code sessions. Covers all 12 scorecard categories.
+# 🧠 prompt-discipline
 
-## Tools
+**Stop wasting tokens on vague prompts.**
 
-| # | Category | Tool | What it does |
-|---|----------|------|-------------|
-| 1 | Plans | `scope_work` | Structured execution plans before coding |
-| 2 | Clarification | `clarify_intent` | Gathers project context to disambiguate vague prompts |
-| 3 | Delegation | `enrich_agent_task` | Enriches sub-agent tasks with file paths and patterns |
-| 4 | Follow-up Specificity | `sharpen_followup` | Resolves "fix it"/"do the others" to actual files |
-| 5 | Token Efficiency | `token_audit` | Detects waste patterns, grades A-F |
-| 6 | Sequencing | `sequence_tasks` | Orders tasks by dependency/locality/risk |
-| 7 | Compaction Mgmt | `checkpoint` | Save game before compaction — commits + resumption notes |
-| 8 | Session Lifecycle | `check_session_health` | Monitors uncommitted files, time since commit |
-| 9 | Error Recovery | `log_correction` | Tracks corrections, identifies error pattern trends |
-| 10 | Workspace Hygiene | `audit_workspace` | Finds stale/missing workspace docs vs git activity |
-| 11 | Cross-Session | `session_handoff` + `what_changed` | Session briefs + diff summaries |
-| 12 | Verification | `verify_completion` | Type check + tests + build before declaring done |
+An 18-tool MCP server for Claude Code that catches ambiguous instructions before they cost you 2-3x in wrong→fix cycles — plus semantic search across your entire session history.
 
-## Install
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![MCP](https://img.shields.io/badge/MCP-Compatible-blueviolet)](https://modelcontextprotocol.io/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-```bash
-git clone https://github.com/alldigitalrewards/prompt-discipline.git
-cd prompt-discipline
-npm install
+</div>
+
+---
+
+## The Problem
+
+We analyzed 125 prompts across 9 real Claude Code sessions. The findings were brutal:
+
+- **41% of prompts were under 50 characters** — things like `fix the tests`, `commit this`, `remove them`
+- Each vague prompt triggers a **wrong→fix cycle costing 2-3x tokens**
+- **~33K characters/day** duplicated from repeated context pastes
+- **6 context compactions** from unbounded session scope
+- Estimated **30-40% of tokens wasted** on avoidable back-and-forth
+
+The pattern is always the same: vague prompt → Claude guesses → wrong output → you correct → repeat. That's your money evaporating.
+
+## The Solution
+
+18 tools in 3 categories that run as an MCP server inside Claude Code:
+
+| Category | What it does |
+|----------|-------------|
+| 🎯 **Prompt Discipline** (12 tools) | Catches vague prompts, enforces structure, prevents waste |
+| 🔍 **Timeline Intelligence** (4 tools) | LanceDB vector search across months of session history |
+| ✅ **Verification & Hygiene** (2 tools) | Type-check, test, and audit before declaring done |
+
+## Before / After
+
+```
+❌  "fix the auth bug"
+     → Claude guesses which auth bug, edits wrong file
+     → You correct it, 3 more rounds
+     → 12,000 tokens burned
+
+✅  prompt-discipline intercepts → clarify_intent fires
+     → "Which auth bug? I see 3 open issues:
+        1. JWT expiry not refreshing (src/auth/jwt.ts)
+        2. OAuth callback 404 (src/auth/oauth.ts)  
+        3. Session cookie SameSite (src/middleware/session.ts)
+        Pick one and I'll scope the fix."
+     → 4,000 tokens, done right the first time
 ```
 
-Add to `.claude/settings.json`:
+## Quick Start
 
+**1. Clone & install:**
+```bash
+git clone https://github.com/TerminalGravity/prompt-discipline.git
+cd prompt-discipline && npm install
+```
+
+**2. Add to your Claude Code config** (`.claude/settings.json` or project `.mcp.json`):
 ```json
 {
   "mcpServers": {
@@ -43,14 +76,99 @@ Add to `.claude/settings.json`:
 }
 ```
 
+**3. Restart Claude Code.** That's it. The tools activate automatically.
+
+## Tool Reference
+
+### 🎯 Prompt Discipline
+
+| Tool | What it does |
+|------|-------------|
+| `scope_work` | Creates structured execution plans before coding starts |
+| `clarify_intent` | Gathers project context to disambiguate vague prompts |
+| `enrich_agent_task` | Enriches sub-agent tasks with file paths and patterns |
+| `sharpen_followup` | Resolves "fix it" / "do the others" to actual file targets |
+| `token_audit` | Detects waste patterns, grades your session A–F |
+| `sequence_tasks` | Orders tasks by dependency, locality, and risk |
+| `checkpoint` | Save game before compaction — commits + resumption notes |
+| `check_session_health` | Monitors uncommitted files, time since commit, turn count |
+| `log_correction` | Tracks corrections and identifies recurring error patterns |
+| `session_handoff` | Generates handoff briefs for new sessions |
+| `what_changed` | Summarizes diffs since last checkpoint |
+
+### 🔍 Timeline Intelligence
+
+| Tool | What it does |
+|------|-------------|
+| `onboard_project` | Indexes a project's session history into LanceDB vectors |
+| `search_history` | Semantic search across all indexed sessions |
+| `timeline` | Chronological view of events across sessions |
+| `scan_sessions` | Live scanning of active session data |
+
+### ✅ Verification & Hygiene
+
+| Tool | What it does |
+|------|-------------|
+| `verify_completion` | Runs type check + tests + build before declaring done |
+| `audit_workspace` | Finds stale/missing workspace docs vs git activity |
+
+## Timeline Intelligence
+
+This is the feature that makes prompt-discipline more than a linter.
+
+When you run `onboard_project`, the server scans your Claude Code session history (JSONL files in `~/.claude/projects/`) and indexes every event into a local [LanceDB](https://lancedb.github.io/lancedb/) database with vector embeddings.
+
+**What that gives you:**
+- 🔎 **Semantic search** — "How did I set up the auth middleware last month?" actually works
+- 📊 **32K+ events** indexed across 9 months of real sessions
+- 🧭 **Timeline view** — see what happened across sessions chronologically
+- 🔄 **Live scanning** — index new sessions as they happen
+
+No data leaves your machine. Embeddings run locally by default (Xenova/transformers.js) or via OpenAI if configured.
+
+## Architecture
+
+```
+Claude Code ←→ MCP Protocol ←→ prompt-discipline server
+                                      │
+                    ┌─────────────────┼─────────────────┐
+                    │                 │                  │
+              Discipline Tools   Timeline Tools    Verification
+              (12 tools)         (4 tools)         (2 tools)
+                                      │
+                                  LanceDB
+                                (local vectors)
+                                      │
+                              ~/.claude/projects/
+                            (session JSONL files)
+```
+
+## Configuration
+
+### Embedding Providers
+
+| Provider | Setup | Speed | Quality |
+|----------|-------|-------|---------|
+| **Local (Xenova)** | Zero config, default | ~50 events/sec | Good |
+| **OpenAI** | Set `OPENAI_API_KEY` env var | ~200 events/sec | Excellent |
+
+### Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `CLAUDE_PROJECT_DIR` | Project root to monitor | Required |
+| `OPENAI_API_KEY` | OpenAI key for embeddings | (uses local Xenova) |
+
+## Contributing
+
+This project is young and there's plenty to do. Check the [issues](https://github.com/TerminalGravity/prompt-discipline/issues) — several are tagged `good first issue`.
+
+PRs welcome. No CLA, no bureaucracy. If it makes the tool better, it gets merged.
+
 ## Full Plugin
 
-This repo contains only the MCP server. For the full plugin with hooks, slash commands, skills, and agents, see: [alldigitalrewards/claude-plugins](https://github.com/alldigitalrewards/claude-plugins) → `plugins/prompt-discipline/`
+Want hooks, slash commands, and skills on top of the MCP server? See the full plugin at [alldigitalrewards/claude-plugins](https://github.com/alldigitalrewards/claude-plugins) → `plugins/prompt-discipline/`
 
-## Based On
+## License
 
-Analysis of 125 prompts across 9 Claude Code sessions:
-- 41% of prompts were under 50 chars (missing files, scope, done conditions)
-- ~33K chars/day duplicated from skill pastes
-- 6 context compactions from unbounded sessions
-- Estimated 30-40% token savings from eliminating vague→wrong→fix cycles
+MIT — do whatever you want with it.
