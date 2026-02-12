@@ -1,5 +1,6 @@
 // =============================================================================
 // generate_scorecard — 12-category prompt discipline report cards (PDF/Markdown)
+// With trend reports, comparative reports, and historical baselines
 // =============================================================================
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -10,6 +11,10 @@ import {
   parseSession,
   type TimelineEvent,
 } from "../lib/session-parser.js";
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
+import { join } from "path";
+import { homedir } from "os";
+import { createHash } from "crypto";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -619,12 +624,487 @@ function loadSessions(opts: {
   return sessions;
 }
 
+// ── Historical Baseline ────────────────────────────────────────────────────
+
+const PREFLIGHT_DIR = join(homedir(), ".preflight", "projects");
+
+function baselinePath(project: string): string {
+  const hash = createHash("md5").update(project).digest("hex").slice(0, 12);
+  return join(PREFLIGHT_DIR, hash, "baseline.json");
+}
+
+interface BaselineData {
+  categoryAverages: Record<string, number>;
+  overallAverage: number;
+  sessionCount: number;
+  lastUpdated: string;
+}
+
+function loadBaseline(project: string): BaselineData | null {
+  const p = baselinePath(project);
+  if (!existsSync(p)) return null;
+  try {
+    return JSON.parse(readFileSync(p, "utf-8")) as BaselineData;
+  } catch {
+    return null;
+  }
+}
+
+function saveBaseline(project: string, data: BaselineData): void {
+  const p = baselinePath(project);
+  const dir = p.replace(/\/[^/]+$/, "");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(p, JSON.stringify(data, null, 2));
+}
+
+function updateBaseline(project: string, scorecard: Scorecard): void {
+  const existing = loadBaseline(project);
+  if (!existing) {
+    const categoryAverages: Record<string, number> = {};
+    for (const c of scorecard.categories) categoryAverages[c.name] = c.score;
+    saveBaseline(project, {
+      categoryAverages,
+      overallAverage: scorecard.overall,
+      sessionCount: 1,
+      lastUpdated: new Date().toISOString(),
+    });
+    return;
+  }
+  const n = existing.sessionCount;
+  const newN = n + 1;
+  existing.overallAverage = Math.round((existing.overallAverage * n + scorecard.overall) / newN);
+  for (const c of scorecard.categories) {
+    const prev = existing.categoryAverages[c.name] ?? c.score;
+    existing.categoryAverages[c.name] = Math.round((prev * n + c.score) / newN);
+  }
+  existing.sessionCount = newN;
+  existing.lastUpdated = new Date().toISOString();
+  saveBaseline(project, existing);
+}
+
+function trendArrow(current: number, previous: number): string {
+  const diff = current - previous;
+  if (diff > 5) return "↑";
+  if (diff < -5) return "↓";
+  return "→";
+}
+
+// ── Trend Report ───────────────────────────────────────────────────────────
+
+interface DailyScore {
+  date: string;
+  score: number;
+  categories: CategoryScore[];
+  sessionCount: number;
+  promptCount: number;
+  toolCallCount: number;
+  correctionCount: number;
+  compactionCount: number;
+}
+
+function generateTrendSVG(dailyScores: { date: string; score: number }[]): string {
+  const W = 400, H = 200, pad = 40;
+  const plotW = W - pad * 2, plotH = H - pad * 2;
+  const n = dailyScores.length;
+  if (n === 0) return `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg"><text x="${W / 2}" y="${H / 2}" text-anchor="middle" fill="#6b7280">No data</text></svg>`;
+
+  const points = dailyScores.map((d, i) => ({
+    x: pad + (n === 1 ? plotW / 2 : (i / (n - 1)) * plotW),
+    y: pad + plotH - (d.score / 100) * plotH,
+  }));
+
+  const gridLines = [0, 25, 50, 75, 100].map((v) => {
+    const y = pad + plotH - (v / 100) * plotH;
+    return `<line x1="${pad}" y1="${y}" x2="${W - pad}" y2="${y}" stroke="#e5e7eb" stroke-width="1"/><text x="${pad - 5}" y="${y + 4}" text-anchor="end" font-size="10" fill="#9ca3af">${v}</text>`;
+  }).join("");
+
+  const labels = dailyScores.map((d, i) => {
+    const x = pad + (n === 1 ? plotW / 2 : (i / (n - 1)) * plotW);
+    const label = d.date.slice(5); // MM-DD
+    return `<text x="${x}" y="${H - 8}" text-anchor="middle" font-size="9" fill="#9ca3af">${label}</text>`;
+  }).join("");
+
+  const pathD = points.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x} ${p.y}`).join(" ");
+  const dots = points.map((p) => `<circle cx="${p.x}" cy="${p.y}" r="3" fill="#3b82f6"/>`).join("");
+
+  return `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">
+  <rect width="${W}" height="${H}" fill="white" rx="4"/>
+  ${gridLines}
+  <path d="${pathD}" fill="none" stroke="#3b82f6" stroke-width="2"/>
+  ${dots}
+  ${labels}
+</svg>`;
+}
+
+function groupSessionsByDay(sessions: ParsedSession[]): Map<string, ParsedSession[]> {
+  const map = new Map<string, ParsedSession[]>();
+  for (const s of sessions) {
+    const ts = s.events[0]?.timestamp;
+    if (!ts) continue;
+    const day = new Date(ts).toISOString().slice(0, 10);
+    if (!map.has(day)) map.set(day, []);
+    map.get(day)!.push(s);
+  }
+  return map;
+}
+
+function scoreDailyData(sessions: ParsedSession[]): DailyScore[] {
+  const byDay = groupSessionsByDay(sessions);
+  const days = [...byDay.keys()].sort();
+  return days.map((date) => {
+    const daySessions = byDay.get(date)!;
+    const sc = computeScorecard(daySessions, "", date);
+    return {
+      date,
+      score: sc.overall,
+      categories: sc.categories,
+      sessionCount: daySessions.length,
+      promptCount: daySessions.reduce((s, d) => s + d.userMessages.length, 0),
+      toolCallCount: daySessions.reduce((s, d) => s + d.toolCalls.length, 0),
+      correctionCount: daySessions.reduce((s, d) => s + d.corrections.length, 0),
+      compactionCount: daySessions.reduce((s, d) => s + d.compactions.length, 0),
+    };
+  });
+}
+
+function findBestWorstPrompt(sessions: ParsedSession[]): { best: string; worst: string } {
+  let best = "", worst = "";
+  let bestScore = -1, worstScore = Infinity;
+
+  for (const s of sessions) {
+    for (const m of s.userMessages) {
+      const text = m.content;
+      if (text.length < 5) continue;
+      // Score: length + file refs bonus
+      const score = text.length + (hasFileRef(text) ? 200 : 0);
+      if (score > bestScore) { bestScore = score; best = text; }
+      if (score < worstScore) { worstScore = score; worst = text; }
+    }
+  }
+  return {
+    best: best.slice(0, 300),
+    worst: worst.slice(0, 200),
+  };
+}
+
+interface TrendReport {
+  project: string;
+  period: string;
+  dailyScores: DailyScore[];
+  categoryTrends: { name: string; current: number; previous: number; arrow: string }[];
+  top3Improve: { category: string; score: number; recommendation: string }[];
+  bestPrompt: string;
+  worstPrompt: string;
+  stats: { sessions: number; prompts: number; toolCalls: number; correctionRate: number; compactions: number };
+  baseline: BaselineData | null;
+  svg: string;
+}
+
+const IMPROVEMENT_TIPS: Record<string, string> = {
+  "Plans": "Start sessions with a detailed plan: list files to touch, expected changes, and success criteria before coding.",
+  "Clarification": "Always reference specific file paths and function names in your prompts instead of speaking abstractly.",
+  "Delegation": "When spawning sub-agents, provide detailed context: file paths, expected output format, and constraints.",
+  "Follow-up Specificity": "After receiving a response, reference specific lines/files rather than saying 'fix it' or 'try again'.",
+  "Token Efficiency": "Batch related changes into single prompts. Avoid asking for one small change at a time.",
+  "Sequencing": "Complete work in one area before moving to the next. Avoid jumping between unrelated files.",
+  "Compaction Management": "Commit before context compaction hits. Keep sessions focused to avoid hitting limits.",
+  "Session Lifecycle": "Commit every 15-30 minutes. Don't let sessions run 3+ hours without checkpoints.",
+  "Error Recovery": "When correcting the AI, be specific: 'In file X, line Y, change Z to W' not 'no, wrong'.",
+  "Workspace Hygiene": "Maintain CLAUDE.md and .claude/ workspace docs for project context.",
+  "Cross-Session Continuity": "Start each session by reading project context files (CLAUDE.md, README, etc.).",
+  "Verification": "Always run tests/build at the end of a session to verify changes work.",
+};
+
+function buildTrendReport(sessions: ParsedSession[], project: string, period: string): TrendReport {
+  const dailyScores = scoreDailyData(sessions);
+  const baseline = loadBaseline(project);
+
+  // Category trends: compare first half vs second half
+  const mid = Math.floor(dailyScores.length / 2);
+  const firstHalf = dailyScores.slice(0, Math.max(1, mid));
+  const secondHalf = dailyScores.slice(Math.max(1, mid));
+
+  const categoryNames = dailyScores[0]?.categories.map((c) => c.name) ?? [];
+  const categoryTrends = categoryNames.map((name) => {
+    const avgFirst = firstHalf.reduce((s, d) => s + (d.categories.find((c) => c.name === name)?.score ?? 0), 0) / (firstHalf.length || 1);
+    const avgSecond = secondHalf.reduce((s, d) => s + (d.categories.find((c) => c.name === name)?.score ?? 0), 0) / (secondHalf.length || 1);
+    return { name, current: Math.round(avgSecond), previous: Math.round(avgFirst), arrow: trendArrow(avgSecond, avgFirst) };
+  });
+
+  // Top 3 to improve
+  const sorted = [...categoryTrends].sort((a, b) => a.current - b.current);
+  const top3Improve = sorted.slice(0, 3).map((t) => ({
+    category: t.name,
+    score: t.current,
+    recommendation: IMPROVEMENT_TIPS[t.name] ?? "Focus on improving this area.",
+  }));
+
+  const { best, worst } = findBestWorstPrompt(sessions);
+
+  const totalPrompts = sessions.reduce((s, d) => s + d.userMessages.length, 0);
+  const totalCorrections = sessions.reduce((s, d) => s + d.corrections.length, 0);
+
+  return {
+    project,
+    period,
+    dailyScores,
+    categoryTrends,
+    top3Improve,
+    bestPrompt: best,
+    worstPrompt: worst,
+    stats: {
+      sessions: sessions.length,
+      prompts: totalPrompts,
+      toolCalls: sessions.reduce((s, d) => s + d.toolCalls.length, 0),
+      correctionRate: totalPrompts > 0 ? Math.round((totalCorrections / totalPrompts) * 100) : 0,
+      compactions: sessions.reduce((s, d) => s + d.compactions.length, 0),
+    },
+    baseline,
+    svg: generateTrendSVG(dailyScores.map((d) => ({ date: d.date, score: d.score }))),
+  };
+}
+
+function trendToMarkdown(tr: TrendReport): string {
+  const lines: string[] = [];
+  const periodLabel = tr.period === "week" ? "Weekly" : "Monthly";
+  lines.push(`# 📈 ${periodLabel} Trend Report`);
+  lines.push(`**Project:** ${tr.project} | **Period:** ${tr.period} | **Days:** ${tr.dailyScores.length}\n`);
+
+  lines.push(`## 📊 Stats`);
+  lines.push(`| Sessions | Prompts | Tool Calls | Correction Rate | Compactions |`);
+  lines.push(`|----------|---------|------------|-----------------|-------------|`);
+  lines.push(`| ${tr.stats.sessions} | ${tr.stats.prompts} | ${tr.stats.toolCalls} | ${tr.stats.correctionRate}% | ${tr.stats.compactions} |\n`);
+
+  lines.push(`## 📉 Score Trend`);
+  lines.push(`| Date | Score | Grade |`);
+  lines.push(`|------|-------|-------|`);
+  for (const d of tr.dailyScores) {
+    lines.push(`| ${d.date} | ${d.score} | ${letterGrade(d.score)} |`);
+  }
+
+  lines.push(`\n## Category Trends`);
+  lines.push(`| Category | Score | Trend |${tr.baseline ? " vs Avg |" : ""}`);
+  lines.push(`|----------|-------|-------|${tr.baseline ? "--------|" : ""}`);
+  for (const t of tr.categoryTrends) {
+    let row = `| ${t.name} | ${t.current} (${letterGrade(t.current)}) | ${t.arrow} |`;
+    if (tr.baseline) {
+      const avg = tr.baseline.categoryAverages[t.name];
+      if (avg != null) row += ` ${trendArrow(t.current, avg)} vs ${letterGrade(avg)} (${avg}) |`;
+      else row += ` — |`;
+    }
+    lines.push(row);
+  }
+
+  lines.push(`\n## 🎯 Top 3 Areas to Improve`);
+  for (const t of tr.top3Improve) {
+    lines.push(`- **${t.category}** (${letterGrade(t.score)}, ${t.score}/100): ${t.recommendation}`);
+  }
+
+  lines.push(`\n## 💬 Prompts of the ${tr.period === "week" ? "Week" : "Month"}`);
+  lines.push(`**Best prompt:**\n> ${tr.bestPrompt}\n`);
+  lines.push(`**Worst prompt:**\n> ${tr.worstPrompt}`);
+
+  return lines.join("\n");
+}
+
+function trendToHTML(tr: TrendReport): string {
+  const periodLabel = tr.period === "week" ? "Weekly" : "Monthly";
+  const categoryRows = tr.categoryTrends.map((t) => {
+    const color = gradeColor(letterGrade(t.current));
+    const baselineCol = tr.baseline ? `<td style="padding:6px;text-align:center">${tr.baseline.categoryAverages[t.name] != null ? `${trendArrow(t.current, tr.baseline.categoryAverages[t.name]!)} ${letterGrade(tr.baseline.categoryAverages[t.name]!)}` : "—"}</td>` : "";
+    return `<tr><td style="padding:6px">${t.name}</td><td style="padding:6px;text-align:center"><span style="background:${color};color:white;padding:2px 6px;border-radius:3px">${letterGrade(t.current)} (${t.current})</span></td><td style="padding:6px;text-align:center;font-size:18px">${t.arrow}</td>${baselineCol}</tr>`;
+  }).join("");
+
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"/></head><body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;margin:0;color:#1f2937">
+  <div style="background:linear-gradient(135deg,#1e293b,#0f172a);color:white;padding:32px 40px">
+    <h1 style="margin:0">📈 ${periodLabel} Trend Report</h1>
+    <p style="margin:8px 0 0;opacity:0.8">Project: <strong>${tr.project}</strong> | ${tr.dailyScores.length} days | ${tr.stats.sessions} sessions</p>
+  </div>
+  <div style="padding:24px 40px;display:flex;gap:20px;flex-wrap:wrap">
+    <div style="background:#f8fafc;padding:12px 20px;border-radius:8px;text-align:center"><div style="font-size:24px;font-weight:700">${tr.stats.sessions}</div><div style="color:#6b7280;font-size:12px">Sessions</div></div>
+    <div style="background:#f8fafc;padding:12px 20px;border-radius:8px;text-align:center"><div style="font-size:24px;font-weight:700">${tr.stats.prompts}</div><div style="color:#6b7280;font-size:12px">Prompts</div></div>
+    <div style="background:#f8fafc;padding:12px 20px;border-radius:8px;text-align:center"><div style="font-size:24px;font-weight:700">${tr.stats.toolCalls}</div><div style="color:#6b7280;font-size:12px">Tool Calls</div></div>
+    <div style="background:#f8fafc;padding:12px 20px;border-radius:8px;text-align:center"><div style="font-size:24px;font-weight:700">${tr.stats.correctionRate}%</div><div style="color:#6b7280;font-size:12px">Correction Rate</div></div>
+    <div style="background:#f8fafc;padding:12px 20px;border-radius:8px;text-align:center"><div style="font-size:24px;font-weight:700">${tr.stats.compactions}</div><div style="color:#6b7280;font-size:12px">Compactions</div></div>
+  </div>
+  <div style="padding:0 40px">${tr.svg}</div>
+  <div style="padding:24px 40px">
+    <h2>Category Trends</h2>
+    <table style="width:100%;border-collapse:collapse;font-size:14px">
+      <thead><tr style="background:#f9fafb"><th style="padding:6px;text-align:left">Category</th><th style="padding:6px;text-align:center">Score</th><th style="padding:6px;text-align:center">Trend</th>${tr.baseline ? '<th style="padding:6px;text-align:center">vs Avg</th>' : ""}</tr></thead>
+      <tbody>${categoryRows}</tbody>
+    </table>
+  </div>
+  <div style="padding:0 40px 20px">
+    <h2>🎯 Top 3 Areas to Improve</h2>
+    ${tr.top3Improve.map((t) => `<div style="background:#fef2f2;border-left:4px solid #f97316;padding:10px 16px;margin-bottom:8px;border-radius:4px"><strong>${t.category}</strong> (${t.score}/100): ${t.recommendation}</div>`).join("")}
+  </div>
+  <div style="padding:0 40px 40px">
+    <h2>💬 Prompts of the ${tr.period === "week" ? "Week" : "Month"}</h2>
+    <div style="background:#f0fdf4;border-left:4px solid #22c55e;padding:10px 16px;margin-bottom:8px;border-radius:4px"><strong>Best:</strong> ${tr.bestPrompt}</div>
+    <div style="background:#fef2f2;border-left:4px solid #ef4444;padding:10px 16px;border-radius:4px"><strong>Worst:</strong> ${tr.worstPrompt}</div>
+  </div>
+</body></html>`;
+}
+
+// ── Comparative Report ─────────────────────────────────────────────────────
+
+interface ComparativeReport {
+  period: string;
+  date: string;
+  projects: { name: string; scorecard: Scorecard }[];
+  patterns: string[];
+}
+
+function buildComparativeReport(projectNames: string[], period: string, since?: string): ComparativeReport {
+  const projects: { name: string; scorecard: Scorecard }[] = [];
+
+  for (const pName of projectNames) {
+    const sessions = loadSessions({ project: pName, period, since });
+    if (sessions.length === 0) continue;
+    const sc = computeScorecard(sessions, pName, period);
+    projects.push({ name: pName, scorecard: sc });
+  }
+
+  // Cross-project patterns
+  const patterns: string[] = [];
+  if (projects.length >= 2) {
+    const categoryNames = projects[0]?.scorecard.categories.map((c) => c.name) ?? [];
+    for (const catName of categoryNames) {
+      const scores = projects.map((p) => p.scorecard.categories.find((c) => c.name === catName)?.score ?? 0);
+      const avg = scores.reduce((a, b) => a + b, 0) / scores.length;
+      const allLow = scores.every((s) => s < 65);
+      const allHigh = scores.every((s) => s >= 80);
+      if (allLow) patterns.push(`⚠️ You're consistently weakest at ${catName} across all projects (avg: ${Math.round(avg)})`);
+      if (allHigh) patterns.push(`✅ ${catName} score is strong everywhere — good habit (avg: ${Math.round(avg)})`);
+    }
+  }
+
+  return { period, date: new Date().toISOString().slice(0, 10), projects, patterns };
+}
+
+function comparativeToMarkdown(cr: ComparativeReport): string {
+  const lines: string[] = [];
+  lines.push(`# 📊 Comparative Report — ${cr.date}`);
+  lines.push(`**Period:** ${cr.period} | **Projects:** ${cr.projects.length}\n`);
+
+  if (cr.projects.length === 0) return lines.join("\n") + "\nNo projects with data found.";
+
+  const catNames = cr.projects[0].scorecard.categories.map((c) => c.name);
+  const nameHeader = cr.projects.map((p) => p.name.padEnd(14)).join("  ");
+  lines.push(`${"".padEnd(24)}${nameHeader}`);
+
+  // Overall
+  const overallRow = cr.projects.map((p) => `${p.scorecard.overallGrade} (${p.scorecard.overall})`.padEnd(14)).join("  ");
+  lines.push(`${"Overall:".padEnd(24)}${overallRow}`);
+
+  for (const catName of catNames) {
+    const row = cr.projects.map((p) => {
+      const c = p.scorecard.categories.find((x) => x.name === catName);
+      return c ? `${c.grade} (${c.score})`.padEnd(14) : "—".padEnd(14);
+    }).join("  ");
+    lines.push(`${(catName + ":").padEnd(24)}${row}`);
+  }
+
+  if (cr.patterns.length > 0) {
+    lines.push(`\n## Cross-project patterns`);
+    for (const p of cr.patterns) lines.push(p);
+  }
+
+  return lines.join("\n");
+}
+
+function comparativeToHTML(cr: ComparativeReport): string {
+  if (cr.projects.length === 0) return "<html><body>No data</body></html>";
+  const catNames = cr.projects[0].scorecard.categories.map((c) => c.name);
+
+  const headerCols = cr.projects.map((p) => `<th style="padding:8px;text-align:center">${p.name}</th>`).join("");
+  const overallCols = cr.projects.map((p) => {
+    const c = gradeColor(p.scorecard.overallGrade);
+    return `<td style="padding:8px;text-align:center"><span style="background:${c};color:white;padding:2px 8px;border-radius:4px;font-weight:700">${p.scorecard.overallGrade} (${p.scorecard.overall})</span></td>`;
+  }).join("");
+
+  const rows = catNames.map((catName) => {
+    const cols = cr.projects.map((p) => {
+      const cat = p.scorecard.categories.find((x) => x.name === catName);
+      if (!cat) return `<td style="padding:6px;text-align:center">—</td>`;
+      const c = gradeColor(cat.grade);
+      return `<td style="padding:6px;text-align:center"><span style="background:${c};color:white;padding:1px 6px;border-radius:3px;font-size:13px">${cat.grade} (${cat.score})</span></td>`;
+    }).join("");
+    return `<tr><td style="padding:6px;font-weight:600">${catName}</td>${cols}</tr>`;
+  }).join("");
+
+  const patternsHTML = cr.patterns.map((p) => `<div style="padding:8px 16px;margin-bottom:4px;background:${p.startsWith("⚠️") ? "#fef2f2" : "#f0fdf4"};border-radius:4px">${p}</div>`).join("");
+
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"/></head><body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;margin:0;color:#1f2937">
+  <div style="background:linear-gradient(135deg,#1e293b,#0f172a);color:white;padding:32px 40px">
+    <h1 style="margin:0">📊 Comparative Report</h1>
+    <p style="margin:8px 0 0;opacity:0.8">Period: ${cr.period} | ${cr.date}</p>
+  </div>
+  <div style="padding:24px 40px">
+    <table style="width:100%;border-collapse:collapse;font-size:14px">
+      <thead><tr style="background:#f9fafb"><th style="padding:8px;text-align:left">Category</th>${headerCols}</tr></thead>
+      <tbody>
+        <tr style="background:#f0f9ff"><td style="padding:8px;font-weight:700">Overall</td>${overallCols}</tr>
+        ${rows}
+      </tbody>
+    </table>
+  </div>
+  ${cr.patterns.length ? `<div style="padding:0 40px 40px"><h2>Cross-project Patterns</h2>${patternsHTML}</div>` : ""}
+</body></html>`;
+}
+
+// ── Enhanced Markdown with baseline ────────────────────────────────────────
+
+function toMarkdownWithBaseline(sc: Scorecard, baseline: BaselineData | null): string {
+  const lines: string[] = [];
+  lines.push(`# 📊 Prompt Discipline Scorecard`);
+  lines.push(`**Project:** ${sc.project} | **Period:** ${sc.period} (${sc.date}) | **Overall: ${sc.overallGrade} (${sc.overall}/100)**\n`);
+
+  lines.push(`## Category Scores`);
+  if (baseline) {
+    lines.push(`| # | Category | Score | Grade | vs Avg |`);
+    lines.push(`|---|----------|-------|-------|--------|`);
+    sc.categories.forEach((c, i) => {
+      const avg = baseline.categoryAverages[c.name];
+      const avgCol = avg != null ? `${trendArrow(c.score, avg)} ${letterGrade(avg)} (${avg})` : "—";
+      lines.push(`| ${i + 1} | ${c.name} | ${c.score} | ${c.grade} | ${avgCol} |`);
+    });
+  } else {
+    lines.push(`| # | Category | Score | Grade |`);
+    lines.push(`|---|----------|-------|-------|`);
+    sc.categories.forEach((c, i) => {
+      lines.push(`| ${i + 1} | ${c.name} | ${c.score} | ${c.grade} |`);
+    });
+  }
+
+  lines.push(`\n## Highlights`);
+  lines.push(`- 🏆 **Best:** ${sc.highlights.best.name} (${sc.highlights.best.grade}) — ${sc.highlights.best.evidence}`);
+  lines.push(`- ⚠️ **Worst:** ${sc.highlights.worst.name} (${sc.highlights.worst.grade}) — ${sc.highlights.worst.evidence}`);
+
+  lines.push(`\n## Detailed Breakdown`);
+  sc.categories.forEach((c, i) => {
+    lines.push(`\n### ${i + 1}. ${c.name} — ${c.grade} (${c.score}/100)`);
+    lines.push(`Evidence: ${c.evidence}`);
+    if (c.examples?.bad?.length) {
+      lines.push(`\nExamples of vague follow-ups:`);
+      c.examples.bad.forEach((e) => lines.push(`- ❌ "${e}"`));
+    }
+    if (c.examples?.good?.length) {
+      lines.push(`\nExamples of specific follow-ups:`);
+      c.examples.good.forEach((e) => lines.push(`- ✅ "${e}"`));
+    }
+  });
+
+  return lines.join("\n");
+}
+
 // ── Tool Registration ──────────────────────────────────────────────────────
 
 export function registerGenerateScorecard(server: McpServer): void {
   server.tool(
     "generate_scorecard",
-    "Generate a prompt discipline scorecard analyzing sessions across 12 categories. Produces markdown or PDF report cards with per-category scores, letter grades, and evidence.",
+    "Generate a prompt discipline scorecard, trend report, or comparative report. Analyzes sessions across 12 categories with PDF/Markdown output, trend lines, and cross-project comparisons.",
     {
       project: z.string().optional().describe("Project name to score. If omitted, scores current project."),
       period: z.enum(["session", "day", "week", "month"]).default("day"),
@@ -632,8 +1112,33 @@ export function registerGenerateScorecard(server: McpServer): void {
       since: z.string().optional().describe("Start date (ISO or relative like '7days')"),
       output: z.enum(["pdf", "markdown"]).default("markdown"),
       output_path: z.string().optional().describe("Where to save PDF. Default: /tmp/scorecard-{date}.pdf"),
+      report_type: z.enum(["scorecard", "trend", "comparative"]).default("scorecard").describe("Type of report: scorecard (default), trend (week/month analysis), or comparative (cross-project)"),
+      compare_projects: z.array(z.string()).optional().describe("Project names for comparative report"),
     },
     async (params) => {
+      const date = new Date().toISOString().slice(0, 10);
+
+      // ── Comparative Report ──
+      if (params.report_type === "comparative") {
+        const projects = params.compare_projects ?? [];
+        if (projects.length < 2) {
+          return { content: [{ type: "text" as const, text: "Comparative report requires at least 2 projects in compare_projects." }] };
+        }
+        const cr = buildComparativeReport(projects, params.period, params.since);
+        if (params.output === "pdf") {
+          const html = comparativeToHTML(cr);
+          const outputPath = params.output_path ?? `/tmp/comparative-${date}.pdf`;
+          try {
+            await generatePDF(html, outputPath);
+            return { content: [{ type: "text" as const, text: `✅ Comparative PDF saved to ${outputPath}\n\n${comparativeToMarkdown(cr)}` }] };
+          } catch (err) {
+            return { content: [{ type: "text" as const, text: `⚠️ PDF failed (${err}). Markdown:\n\n${comparativeToMarkdown(cr)}` }] };
+          }
+        }
+        return { content: [{ type: "text" as const, text: comparativeToMarkdown(cr) }] };
+      }
+
+      // ── Load sessions ──
       const sessions = loadSessions({
         project: params.project,
         sessionId: params.session_id,
@@ -642,32 +1147,54 @@ export function registerGenerateScorecard(server: McpServer): void {
       });
 
       if (sessions.length === 0) {
-        return {
-          content: [{ type: "text" as const, text: "No sessions found matching the criteria. Try broadening the time period or checking the project name." }],
-        };
+        return { content: [{ type: "text" as const, text: "No sessions found matching the criteria. Try broadening the time period or checking the project name." }] };
       }
 
       const projectName = params.project ?? sessions[0]?.events[0]?.project_name ?? "unknown";
-      const scorecard = computeScorecard(sessions, projectName, params.period);
 
-      if (params.output === "pdf") {
-        const html = toHTML(scorecard);
-        const outputPath = params.output_path ?? `/tmp/scorecard-${scorecard.date}.pdf`;
-        try {
-          await generatePDF(html, outputPath);
-          return {
-            content: [{ type: "text" as const, text: `✅ PDF scorecard saved to ${outputPath}\n\n${toMarkdown(scorecard)}` }],
-          };
-        } catch (err) {
-          return {
-            content: [{ type: "text" as const, text: `⚠️ PDF generation failed (${err}). Falling back to markdown:\n\n${toMarkdown(scorecard)}` }],
-          };
+      // ── Trend Report ──
+      if (params.report_type === "trend" || (params.report_type === "scorecard" && (params.period === "week" || params.period === "month") && !params.session_id)) {
+        // For week/month periods, auto-generate trend if report_type is scorecard
+        // but only if not requesting a specific session
+        if (params.report_type !== "trend" && params.period !== "week" && params.period !== "month") {
+          // Fall through to regular scorecard
+        } else {
+          const tr = buildTrendReport(sessions, projectName, params.period);
+          // Also update baseline
+          const overallSc = computeScorecard(sessions, projectName, params.period);
+          updateBaseline(projectName, overallSc);
+
+          if (params.output === "pdf") {
+            const html = trendToHTML(tr);
+            const outputPath = params.output_path ?? `/tmp/trend-${date}.pdf`;
+            try {
+              await generatePDF(html, outputPath);
+              return { content: [{ type: "text" as const, text: `✅ Trend PDF saved to ${outputPath}\n\n${trendToMarkdown(tr)}` }] };
+            } catch (err) {
+              return { content: [{ type: "text" as const, text: `⚠️ PDF failed (${err}). Markdown:\n\n${trendToMarkdown(tr)}` }] };
+            }
+          }
+          return { content: [{ type: "text" as const, text: trendToMarkdown(tr) }] };
         }
       }
 
-      return {
-        content: [{ type: "text" as const, text: toMarkdown(scorecard) }],
-      };
+      // ── Regular Scorecard ──
+      const scorecard = computeScorecard(sessions, projectName, params.period);
+      const baseline = loadBaseline(projectName);
+      updateBaseline(projectName, scorecard);
+
+      if (params.output === "pdf") {
+        const html = toHTML(scorecard);
+        const outputPath = params.output_path ?? `/tmp/scorecard-${date}.pdf`;
+        try {
+          await generatePDF(html, outputPath);
+          return { content: [{ type: "text" as const, text: `✅ PDF scorecard saved to ${outputPath}\n\n${toMarkdownWithBaseline(scorecard, baseline)}` }] };
+        } catch (err) {
+          return { content: [{ type: "text" as const, text: `⚠️ PDF generation failed (${err}). Falling back to markdown:\n\n${toMarkdownWithBaseline(scorecard, baseline)}` }] };
+        }
+      }
+
+      return { content: [{ type: "text" as const, text: toMarkdownWithBaseline(scorecard, baseline) }] };
     },
   );
 }
